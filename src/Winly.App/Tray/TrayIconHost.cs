@@ -67,7 +67,8 @@ public sealed class TrayIconHost : IDisposable
         using var graphics = Graphics.FromImage(bitmap);
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.Clear(Color.Transparent);
-        using var bodyBrush = new SolidBrush(Color.FromArgb(242, 180, 65));
+        using var bodyBrush = new SolidBrush(Color.FromArgb(27, 26, 22));
+        using var eyeBrush = new SolidBrush(Color.FromArgb(242, 239, 232));
         using var body = new GraphicsPath();
         body.AddArc(2, 2, 12, 12, 180, 90);
         body.AddArc(18, 2, 12, 12, 270, 90);
@@ -75,11 +76,12 @@ public sealed class TrayIconHost : IDisposable
         body.AddArc(2, 18, 12, 12, 90, 90);
         body.CloseFigure();
         graphics.FillPath(bodyBrush, body);
-        graphics.FillEllipse(Brushes.Black, 8, 10, 5, 8);
-        graphics.FillEllipse(Brushes.Black, 19, 10, 5, 8);
+        graphics.FillEllipse(eyeBrush, 8, 10, 5, 8);
+        graphics.FillEllipse(eyeBrush, 19, 10, 5, 8);
         if (captureActive)
         {
-            graphics.FillEllipse(Brushes.Red, 20, 20, 11, 11);
+            using var captureBrush = new SolidBrush(Color.FromArgb(229, 72, 77));
+            graphics.FillEllipse(captureBrush, 20, 20, 11, 11);
         }
 
         return Icon.FromHandle(bitmap.GetHicon());

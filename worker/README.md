@@ -20,7 +20,34 @@ Route contracts: `specs/001-core-companion-loop/contracts/worker-api.md`.
 npx wrangler secret put CHAT_PROVIDER_API_KEY
 npx wrangler secret put SPEECH_TO_TEXT_PROVIDER_API_KEY
 npx wrangler secret put TEXT_TO_SPEECH_PROVIDER_API_KEY
+npx wrangler secret put WINLY_CLIENT_TOKEN
 ```
+
+`WINLY_CLIENT_TOKEN` is the shared token every desktop client presents as
+`Authorization: Bearer <token>`. Every POST is refused with `401 unauthorized` without it —
+including when the secret itself is unset, deliberately: an auth check that disappears along with
+its secret is the failure it exists to prevent, and a secret written but never promoted to the live
+deployment is the common way that happens here (see Commands).
+
+It is not a provider credential, so Principle I is untouched — it gates this Worker only. Generate
+one and set it from a file rather than pasting at the masked prompt:
+
+```
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))" > token.txt
+npx wrangler secret put WINLY_CLIENT_TOKEN < token.txt
+```
+
+Then set the same value on the client machine and restart Winly:
+
+```
+setx WINLY_BACKEND_TOKEN "<token>"
+```
+
+Ceiling worth knowing: one shared token, extractable from any copy of the client binary. It closes
+the real exposure — a leaked URL letting a stranger spend the provider credits — and raises control
+of a linked Spotify account from "learn an install id" to "learn an install id *and* hold the
+binary". It does not survive public distribution; that wants per-install tokens behind a real
+sign-in.
 
 ## Optional secrets
 

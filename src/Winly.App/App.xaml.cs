@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Windows;
 using Serilog;
 using Winly.App.Overlay;
@@ -36,6 +37,7 @@ public partial class App : Application
     private JsonFileSettingsStore? _settingsStore;
     private ProxyMusicService? _music;
     private ReminderScheduler? _reminders;
+    private JsonLinesActionRecord? _actionRecord;
 
     protected override async void OnStartup(StartupEventArgs startupEventArgs)
     {
@@ -74,34 +76,56 @@ public partial class App : Application
         var proxy = ProxyEndpointOptions.FromEnvironment();
         // A base address, never a credential (Constitution Principle I) - and the one fact worth
         // having in the log, since "not configured" is otherwise indistinguishable from an outage.
-        Log.Information("Backend {Backend}", proxy.IsConfigured ? proxy.BaseAddress!.AbsoluteUri : "not configured");
+        // Whether the token is present, never its value: "not configured" and "the backend is down"
+        // are otherwise indistinguishable in a log that says neither, and a missing token now looks
+        // exactly like an outage from the client side.
+        Log.Information(
+            "Backend {Backend} token {Token}",
+            proxy.IsConfigured ? proxy.BaseAddress!.AbsoluteUri : "not configured",
+            proxy.HasToken ? "present" : "missing");
         // One pooled HTTP/2 client for every route: the token mint at key-down warms the connection
         // that /chat and /tts then multiplex over, so neither pays for a fresh handshake (SC-001).
-        var httpClient = new HttpClient(new SocketsHttpHandler { PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10) })
+        var httpClient = new HttpClient(new SocketsHttpHandler
+        {
+            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10),
+            // Without this a cold connect walks the backend's AAAA records first and waits out a
+            // 21 s SYN timeout each, on any network whose IPv6 path is broken. See HappyEyeballsConnect.
+            ConnectCallback = HappyEyeballsConnect.Connect,
+        })
         {
             Timeout = TimeSpan.FromSeconds(60),
             DefaultRequestVersion = HttpVersion.Version20,
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
         };
+        // Set once on the shared client, so every route is gated and a route added later cannot
+        // forget. The backend refuses an unauthenticated POST outright.
+        if (proxy.HasToken)
+        {
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", proxy.Token);
+        }
         _music = new ProxyMusicService(httpClient, proxy, settings.InstallId);
         _reminders = new ReminderScheduler();
+        _actionRecord = new JsonLinesActionRecord();
         _overlay = new CompanionOverlayHost(settings.CompanionVisibilityMode);
         _orchestrator = new CompanionOrchestrator(
             new LowLevelKeyboardHookActivationMonitor(),
             new WasapiMicrophoneCapture(),
             new GraphicsCaptureDisplayCapture(),
-            new StreamingSpeechToTextProvider(new TranscriptionTokenClient(httpClient, proxy)),
+            // The transcriber is told what is open, because "pin Zen Browser" is only transcribable
+            // by something that has heard of Zen Browser.
+            new StreamingSpeechToTextProvider(new TranscriptionTokenClient(httpClient, proxy), AppMatcher.WindowedAppNames),
             new ProxyChatProvider(httpClient, proxy),
             new ProxyTextToSpeechProvider(httpClient, proxy),
             new NAudioPlayback(),
             _overlay,
             new WindowsDesktopActions(_music),
             _reminders,
+            _actionRecord,
             new ConversationSession(),
             settings,
             Log.Logger);
 
-        _panel = new CompanionPanelWindow(_orchestrator, ApplySettings, ConnectMusic);
+        _panel = new CompanionPanelWindow(_orchestrator, ApplySettings, ConnectMusic, _actionRecord);
         _tray = new TrayIconHost(openPanel: () => _panel.ShowPanel(), exit: Shutdown);
 
         _orchestrator.StateMachine.StateChanged += state => Dispatcher.InvokeAsync(() =>
@@ -116,9 +140,14 @@ public partial class App : Application
             _tray.Notify("Winly", message);
         });
 
-        _panel.ShowBackend(proxy.IsConfigured
-            ? $"Backend: {proxy.BaseAddress}"
-            : $"Backend: not configured — set {ProxyEndpointOptions.EnvironmentVariableName} and restart");
+        _panel.ShowBackend(
+            !proxy.IsConfigured
+                ? $"Backend: not configured — set {ProxyEndpointOptions.EnvironmentVariableName} and restart"
+                : !proxy.HasToken
+                    // The backend answers 401 to everything without this, which reads from the
+                    // client exactly like an outage. Say which it is, here, once.
+                    ? $"Backend: {proxy.BaseAddress} — no token; set {ProxyEndpointOptions.TokenVariableName} and restart"
+                    : $"Backend: {proxy.BaseAddress}");
         if (!proxy.IsConfigured)
         {
             var message = FailureMessages.For(new Core.Providers.ProxyNotConfiguredException());

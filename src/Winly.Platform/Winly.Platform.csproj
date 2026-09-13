@@ -16,6 +16,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- System.Windows.Automation (SpotifyUiControl) lives in the WPF half of the Windows Desktop
+         runtime, which Winly.App already requires. Referenced directly rather than via UseWPF: that
+         property also swaps in WPF's implicit-usings set, which drops System.IO out from under the
+         audio code, and drags XAML build targets into a project that has no XAML. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="NAudio" Version="3.1.0" />
     <!-- The only interface that reaches an internal panel's backlight is WMI. -->
     <PackageReference Include="System.Management" Version="9.0.0" />

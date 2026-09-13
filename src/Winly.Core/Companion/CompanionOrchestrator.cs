@@ -22,6 +22,12 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
 
     private const string NoAnswerText = "I don't have an answer for that.";
 
+    /// <summary>
+    /// How long the transcriber gets to hand back a confirmation answer after the microphone has
+    /// closed. The audio is already in; this is the round trip, not the listening.
+    /// </summary>
+    private static readonly TimeSpan TranscriptionGrace = TimeSpan.FromSeconds(8);
+
     private readonly IActivationKeyMonitor _activationKeys;
     private readonly IMicrophoneCapture _microphone;
     private readonly IDisplayCapture _displays;
@@ -32,6 +38,8 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
     private readonly ICompanionOverlay _overlay;
     private readonly IDesktopActions _actions;
     private readonly ReminderScheduler _reminders;
+    private readonly DesktopActionSequenceRunner _sequenceRunner;
+    private readonly IActionRecord _record;
     private readonly ILogger _log;
     private readonly Lock _gate = new();
 
@@ -49,10 +57,12 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
         ICompanionOverlay overlay,
         IDesktopActions actions,
         ReminderScheduler reminders,
+        IActionRecord record,
         ConversationSession session,
         UserSettings settings,
         ILogger log)
     {
+        _record = record;
         _activationKeys = activationKeys;
         _microphone = microphone;
         _displays = displays;
@@ -65,6 +75,14 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
         _reminders = reminders;
         Session = session;
         Settings = settings;
+        // Reads the property rather than the parameter: settings are replaced wholesale when the
+        // user saves the panel, and the runner must see the current value, not the startup one.
+        _sequenceRunner = new DesktopActionSequenceRunner(
+            actions,
+            reminders,
+            ActionBounds.Default,
+            ConfirmAloud,
+            () => Settings.DesktopActionsEnabled);
         _log = log;
         _reminders.Elapsed += OnReminderElapsed;
     }
@@ -76,6 +94,12 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
     public UserSettings Settings { get; set; }
 
     internal Task CurrentRun { get; private set; } = Task.CompletedTask;
+
+    /// <summary>
+    /// How long the microphone stays open for a spoken confirmation (FR-012b). Settable so the test
+    /// does not have to spend five real seconds per confirmation.
+    /// </summary>
+    internal TimeSpan ConfirmationWindow { get; init; } = SpokenConfirmation.Window;
 
     public event Action<string>? TranscriptRecognized;
 
@@ -184,6 +208,10 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                 return;
             }
 
+            // Before Winly speaks or acts: where the user is looking right now is what they mean by
+            // "here" if this turn out to be a typing request (FR-016).
+            _actions.RememberTypingTarget();
+
             var audio = await _microphone.StartCapture(cancellationToken);
             var transcription = _speechToText.Transcribe(audio, cancellationToken);
 
@@ -210,7 +238,15 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             }
 
             var releasedAt = Stopwatch.GetTimestamp();
+
+            // Before the transcript, not after it: the microphone is already closed, so leaving the
+            // Listening indicator up would keep showing a capture badge for something that is no
+            // longer being captured (FR-027) — and it is the stretch the user reads as a freeze,
+            // because waiting on the transcript is the longest silent step of the whole turn.
+            Transition(activation, CompanionState.Working);
+
             var transcript = (await transcription).Trim();
+            var transcriptAt = Stopwatch.GetTimestamp();
             TranscriptRecognized?.Invoke(transcript);
             if (transcript.Length == 0)
             {
@@ -218,8 +254,6 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                 Finish(activation);
                 return;
             }
-
-            Transition(activation, CompanionState.Working);
 
             if (!Settings.ScreenCaptureEnabled)
             {
@@ -229,6 +263,7 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             var accumulator = new SentenceAccumulator();
             var speechQueue = Channel.CreateUnbounded<Task<SpokenAudio>>();
             var queuedAnySpeech = false;
+            long firstDeltaAt = 0;
 
             void QueueSpeech(string sentence)
             {
@@ -255,8 +290,15 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                         {
                             playbackStarted = true;
                             Transition(activation, CompanionState.Speaking);
-                            _log.Information("activation.latency {ElapsedMilliseconds} ms from key release to playback start",
-                                Stopwatch.GetElapsedTime(releasedAt).TotalMilliseconds);
+                            // Split by stage, not just the total: three providers sit between the key
+                            // and the first word, and without the split "make it faster" is a guess
+                            // about which one to go at. -1 means the answer never streamed a delta.
+                            _log.Information(
+                                "activation.latency {ElapsedMilliseconds} ms from key release to playback start (transcript {TranscriptMs} ms, first token {FirstTokenMs} ms, speech {SpeechMs} ms)",
+                                Stopwatch.GetElapsedTime(releasedAt).TotalMilliseconds,
+                                Stopwatch.GetElapsedTime(releasedAt, transcriptAt).TotalMilliseconds,
+                                firstDeltaAt == 0 ? -1 : Stopwatch.GetElapsedTime(transcriptAt, firstDeltaAt).TotalMilliseconds,
+                                firstDeltaAt == 0 ? -1 : Stopwatch.GetElapsedTime(firstDeltaAt).TotalMilliseconds);
                         }
 
                         await _playback.Play(spokenAudio, cancellationToken);
@@ -266,6 +308,11 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
 
             void OnDelta(string delta)
             {
+                if (firstDeltaAt == 0)
+                {
+                    firstDeltaAt = Stopwatch.GetTimestamp();
+                }
+
                 AnswerDeltaReceived?.Invoke(delta);
                 foreach (var sentence in accumulator.Append(delta))
                 {
@@ -302,7 +349,7 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             }
 
             var (narration, target) = PointingDesignationParser.Parse(answer.Text, answer.PointingTarget);
-            var (actionFreeNarration, action) = DesktopActionParser.Parse(narration, answer.Action);
+            var (actionFreeNarration, actions) = DesktopActionParser.Parse(narration, answer.Actions);
             var spokenText = AnswerTextSanitizer.Sanitize(actionFreeNarration);
             if (spokenText.Length == 0)
             {
@@ -320,12 +367,26 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             }
 
             // Started before the answer finishes playing, so the app is opening as Winly says so.
-            var followUp = action is null ? null : await RunDesktopAction(action, cancellationToken);
+            var sequence = await RunDesktopActions(actions, cancellationToken);
 
             await speaking;
-            if (!string.IsNullOrWhiteSpace(followUp))
+            foreach (var outcome in sequence.Outcomes)
             {
-                await Announce(followUp, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(outcome.FollowUpSpeech))
+                {
+                    await Announce(outcome.FollowUpSpeech, cancellationToken);
+                }
+            }
+
+            // Spoken, not just posted to the panel. The answer has already said "playing it" or
+            // "opening it" out loud, so an action that then failed leaves the user with a claim and
+            // no way to hear it retracted — the panel is not open, and this is the whole reason
+            // "it says it is playing the video but it does not" looked like a lie rather than a
+            // failure. Fail loud (Principle VII): whatever contradicts the answer is said aloud too.
+            var unfinished = FailureMessages.ForSequence(sequence);
+            if (unfinished.Length > 0)
+            {
+                await Announce(unfinished, cancellationToken);
             }
 
             Session.Append(new Exchange(transcript, spokenText, targetCapture is null ? null : target, DateTimeOffset.UtcNow));
@@ -387,35 +448,98 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
     private static string SpokenNarration(ChatAnswer answer)
     {
         var (narration, _) = PointingDesignationParser.Parse(answer.Text, answer.PointingTarget);
-        return DesktopActionParser.Parse(narration, answer.Action).SpokenText;
+        return DesktopActionParser.Parse(narration, answer.Actions).SpokenText;
     }
 
-    private async Task<string?> RunDesktopAction(DesktopAction action, CancellationToken cancellationToken)
+    /// <summary>
+    /// Asks about one consequential action and listens for the answer (FR-012).
+    ///
+    /// The question is spoken to completion *before* the microphone opens. Winly's own voice is
+    /// coming out of the user's speakers, so capturing while it is still playing transcribes Winly
+    /// asking the question — and the most likely thing to be transcribed is the prompt's own
+    /// closing words, which is how "Should I go ahead?" ends up answering itself.
+    /// </summary>
+    private async Task<bool> ConfirmAloud(DesktopAction action, CancellationToken cancellationToken)
     {
-        if (!Settings.DesktopActionsEnabled)
+        await Announce(ConsequentialActionClassifier.Ask(action), cancellationToken);
+
+        if (!Settings.MicrophoneCaptureEnabled)
         {
-            Post("Desktop actions are turned off in settings, so I only answered.");
-            return null;
+            Post("I can't ask you about that with the microphone turned off, so I left it alone.");
+            return false;
+        }
+
+        // Bounds the whole exchange rather than the answer. The window itself closes the microphone
+        // below; this only stops a wedged transcriber from holding the sequence open forever.
+        using var listening = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        listening.CancelAfter(ConfirmationWindow + TranscriptionGrace);
+        try
+        {
+            // The overlay alone, not the state machine: this is a brief sub-step inside one
+            // activation rather than a lifecycle change, and the indicator is what Principle II
+            // actually requires while the microphone is open.
+            _overlay.SetState(CompanionState.Listening);
+            var audio = await _microphone.StartCapture(listening.Token);
+            var transcribing = _speechToText.Transcribe(audio, listening.Token);
+
+            // The window ends the *capture*, exactly as releasing the key does on a normal turn —
+            // it must not cancel the transcription. Cancelling threw the answer away instead of
+            // reading it, and the transcriber only finalizes a turn once the audio stream ends, so
+            // every confirmation timed out and every spoken "yes" was recorded as a refusal.
+            await Task.Delay(ConfirmationWindow, listening.Token);
+            await _microphone.StopCapture();
+
+            var answer = await transcribing;
+            _log.Information("Confirmation for {Kind} heard as {Answer}", action.Kind, answer);
+            return SpokenConfirmation.IsAgreement(answer);
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // Silence, an unusable microphone, or nothing recognisable: all refusals (FR-012b).
+            _log.Information(failure, "No confirmation was heard for {Kind}", action.Kind);
+            return false;
+        }
+        finally
+        {
+            await _microphone.StopCapture();
+            _overlay.SetState(CompanionState.Working);
+        }
+    }
+
+    private async Task<ActionSequenceResult> RunDesktopActions(
+        IReadOnlyList<DesktopAction> actions,
+        CancellationToken cancellationToken)
+    {
+        if (actions.Count == 0)
+        {
+            return ActionSequenceResult.Nothing;
         }
 
         try
         {
-            if (action.Kind == DesktopActionKind.Timer)
+            // The acting permission is enforced inside the runner, per action, so that revoking it
+            // mid-sequence is caught (FR-019) and so that refused attempts still reach the record
+            // rather than vanishing before one exists (FR-022).
+            var sequence = await _sequenceRunner.Run(actions, cancellationToken);
+            foreach (var outcome in sequence.Outcomes)
             {
-                // Kept here rather than in the platform layer: announcing it needs the voice.
-                _reminders.Schedule(TimeSpan.FromSeconds(action.Amount), action.Target);
-                _log.Information("Timer set for {Seconds}s: {Label}", action.Amount, action.Target);
-                return null;
+                _log.Information(
+                    "Desktop action {Kind} on {Target}: {Status} {Reason}",
+                    outcome.Action.Kind,
+                    outcome.Action.Target,
+                    outcome.Status,
+                    outcome.UserFacingReason);
+                _record.Append(ActionRecordEntry.From(outcome, DateTimeOffset.UtcNow));
             }
 
-            return await _actions.Run(action, cancellationToken);
+            return sequence;
         }
         catch (Exception failure) when (failure is not OperationCanceledException)
         {
             // The answer is already being spoken; a failed action must not take it down (Principle VII).
-            _log.Error(failure, "Desktop action {Kind} on {Target} failed", action.Kind, action.Target);
+            _log.Error(failure, "Desktop action sequence failed");
             Post(FailureMessages.For(failure));
-            return null;
+            return ActionSequenceResult.Nothing;
         }
     }
 

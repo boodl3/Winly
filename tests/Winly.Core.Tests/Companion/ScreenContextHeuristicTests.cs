@@ -19,6 +19,7 @@ public class ScreenContextHeuristicTests
     [InlineData("open notepad")]
     [InlineData("lock my pc")]
     [InlineData("put chrome on the left")]
+    [InlineData("pin claude to the left")]      // "to the left" is a snap, not a screen question
     [InlineData("remind me in twenty minutes to stretch")]
     [InlineData("what song is this")]               // answered by the now-playing line
     [InlineData("who is the artist")]

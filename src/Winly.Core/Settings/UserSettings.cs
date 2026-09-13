@@ -5,7 +5,9 @@ public sealed record UserSettings
 {
     public string ActivationKeyCombination { get; init; } = "LWin+LAlt";
 
-    public CompanionVisibilityMode CompanionVisibilityMode { get; init; } = CompanionVisibilityMode.InteractionOnly;
+    /// <summary>Visible by default: the companion follows the cursor, so withdrawing it between requests
+    /// hides the thing it now spends most of its time doing. Still switchable in the panel.</summary>
+    public CompanionVisibilityMode CompanionVisibilityMode { get; init; } = CompanionVisibilityMode.AlwaysVisible;
 
     public bool ScreenCaptureEnabled { get; init; } = true;
 

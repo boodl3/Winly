@@ -423,7 +423,7 @@ and confirm nothing is captured and the user is told why.
 - [X] T078 [P] Add `THIRD-PARTY-NOTICES.txt` at the repository root preserving the
       license notices for every dependency listed in plan.md's Technical Context
       (Constitution Principle III)
-- [ ] T079 [P] Build a latency-measurement harness recording key-release-to-first-
+- [X] T079 [P] Build a latency-measurement harness recording key-release-to-first-
       audible-word timing across at least 20 real activations on a broadband
       connection; record median and p95 against the ≤4s/≤7s targets in
       `tests/manual-verification.md` (SC-001)
@@ -431,7 +431,7 @@ and confirm nothing is captured and the user is told why.
       test set, recording the percentage of attempts landing within the intended
       element's bounds against the ≥80% target, in `tests/manual-verification.md`
       (SC-003)
-- [ ] T081 [P] Run a 20-consecutive-activation soak test and confirm no activation
+- [X] T081 [P] Run a 20-consecutive-activation soak test and confirm no activation
       leaves the application in a state requiring restart; record the run in
       `tests/manual-verification.md` (SC-009)
 - [ ] T082 [P] Verify no capture-related file writes occur: monitor the file system

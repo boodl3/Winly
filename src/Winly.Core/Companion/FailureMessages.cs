@@ -28,4 +28,45 @@ public static class FailureMessages
         TimeoutException or TaskCanceledException => "That took too long. Please try again.",
         _ => "Something went wrong on my end. Please try again.",
     };
+
+    /// <summary>
+    /// What to say when a sequence did not finish everything it was asked to (FR-008): which parts
+    /// completed and which did not, in the same plain language as every other failure here. Empty
+    /// when everything completed, because the spoken answer already said what was happening.
+    /// </summary>
+    public static string ForSequence(ActionSequenceResult sequence)
+    {
+        if (sequence.EverythingCompleted)
+        {
+            return string.Empty;
+        }
+
+        var completed = sequence.Outcomes.Count(outcome => outcome.Status == ActionOutcomeStatus.Completed);
+        var stopper = sequence.Stopper;
+        if (stopper is null)
+        {
+            return sequence.StoppedAtActionLimit
+                ? $"{DoneSoFar(completed)}, but that was more than I can do in one go, so the rest didn't happen."
+                : string.Empty;
+        }
+
+        // Nothing happened at all, so there is no partial progress to describe and the reason says
+        // everything. This is also what keeps a one-action request sounding exactly as it did
+        // before sequences existed (FR-006).
+        if (completed == 0)
+        {
+            return stopper.UserFacingReason;
+        }
+
+        // The reason is already a whole sentence from whatever produced it, so its own full stop
+        // would land in the middle of this one.
+        var reason = stopper.UserFacingReason.TrimEnd('.', ' ');
+        return $"{DoneSoFar(completed)}, but {reason}.";
+    }
+
+    private static string DoneSoFar(int completed) => completed switch
+    {
+        1 => "I got the first part done",
+        _ => $"I got the first {completed} parts done",
+    };
 }

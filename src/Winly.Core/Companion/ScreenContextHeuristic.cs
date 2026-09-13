@@ -28,13 +28,19 @@ public static partial class ScreenContextHeuristic
 
     // Deliberately excludes bare "this"/"that": "pause the song that's playing" is a command, not a
     // question about the screen. "window" is excluded too, since closing one is a window command.
+    //
+    // "video", "click" and the ordinals were added after "play the first Procreate video" went out
+    // with no screenshots attached at all: it matched "play" below, so it was classified as a music
+    // command, and the model — with nothing to look at — answered that the video should be up on
+    // Edge. A request that names something on the page has to be able to see the page, even when it
+    // also contains a command word.
     [GeneratedRegex(
-        @"\b(screen|monitor|display|desktop|showing|shown|visible|see|seeing|look|looking|read|reading|button|icon|tab|dialog|popup|menu|toolbar|highlight\w*|selected|cursor|webpage|web page|this page|this says|it says|error message|what does this|what is this|what's this|point at|point to|translate|summari[sz]e|explain this|describe)\b",
+        @"\b(screen|monitor|display|desktop|showing|shown|visible|see|seeing|look|looking|read|reading|button|icon|tab|dialog|popup|menu|toolbar|highlight\w*|selected|cursor|webpage|web page|this page|this says|it says|error message|what does this|what is this|what's this|point at|point to|translate|summari[sz]e|explain this|describe|click|clicking|tap|press|video|thumbnail|link|result|results|first one|second one|top one)\b",
         RegexOptions.IgnoreCase)]
     private static partial Regex LooksAtSomething();
 
     [GeneratedRegex(
-        @"\b(play|pause|resume|stop|skip|next|previous|rewind|shuffle|repeat|queue|mute|unmute|louder|quieter|volume|turn (it |the )?(up|down)|open|launch|start|close|quit|minimi[sz]e|maximi[sz]e|restore|snap|focus|switch to|lock|sleep|shut down|brightness|dark mode|light mode|night light|wi-?fi|bluetooth|timer|remind|type|clipboard|copy that|paste|on the (left|right)|(left|right) half)\b",
+        @"\b(play|pause|resume|stop|skip|next|previous|rewind|shuffle|repeat|queue|mute|unmute|louder|quieter|volume|turn (it |the )?(up|down)|open|launch|start|close|quit|minimi[sz]e|maximi[sz]e|restore|snap|focus|switch to|lock|sleep|shut down|brightness|dark mode|light mode|night light|wi-?fi|bluetooth|timer|remind|type|clipboard|copy that|paste|pin|dock|(on|to) the (left|right)|(left|right) half)\b",
         RegexOptions.IgnoreCase)]
     private static partial Regex AsksTheMachineToDoSomething();
 

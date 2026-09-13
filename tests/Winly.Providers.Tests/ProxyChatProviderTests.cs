@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using Winly.Core.Actions;
 using Winly.Core.Companion;
 using Winly.Core.Pointing;
 using Winly.Core.Providers;
@@ -21,7 +22,7 @@ public class ProxyChatProviderTests
         }
     }
 
-    private static readonly ProxyEndpointOptions Endpoint = new(new Uri("https://winly.example.test/"));
+    private static readonly ProxyEndpointOptions Endpoint = new(new Uri("https://winly.example.test/"), "test-token");
 
     [Fact]
     public async Task StreamsDeltasAndReturnsTheStructuredPointingTarget()
@@ -81,9 +82,53 @@ public class ProxyChatProviderTests
     public async Task MissingBaseAddressFailsBeforeAnyRequest()
     {
         var handler = new StubHandler(_ => throw new InvalidOperationException("must not be called"));
-        var provider = new ProxyChatProvider(new HttpClient(handler), new ProxyEndpointOptions(BaseAddress: null));
+        var provider = new ProxyChatProvider(new HttpClient(handler), new ProxyEndpointOptions(BaseAddress: null, Token: "t"));
 
         await Assert.ThrowsAsync<ProxyNotConfiguredException>(() => provider.Ask(new ChatRequest("q", [], []), _ => { }, CancellationToken.None));
         Assert.Null(handler.LastRequest);
+    }
+
+    private static async Task<ChatAnswer> AnswerFrom(string doneEvent)
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(doneEvent) });
+        var provider = new ProxyChatProvider(new HttpClient(handler), Endpoint);
+        return await provider.Ask(new ChatRequest("q", [], []), _ => { }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TheActionsArrayIsReadInOrder()
+    {
+        var answer = await AnswerFrom(
+            "data: {\"done\":true,\"actions\":["
+            + "{\"action\":\"open\",\"target\":\"Spotify\"},"
+            + "{\"action\":\"play\",\"target\":\"jazz\"}"
+            + "]}\n\n");
+
+        Assert.Equal(
+            [new DesktopAction(DesktopActionKind.Open, "Spotify"), new DesktopAction(DesktopActionKind.Play, "jazz")],
+            answer.Actions);
+    }
+
+    [Fact]
+    public async Task NoActionsFieldMeansNoActions()
+    {
+        var answer = await AnswerFrom("data: {\"done\":true,\"pointingTarget\":null}\n\n");
+
+        Assert.Empty(answer.Actions);
+    }
+
+    [Fact]
+    public async Task AMalformedEntryIsDiscardedWithoutVoidingTheRestOfTheArray()
+    {
+        var answer = await AnswerFrom(
+            "data: {\"done\":true,\"actions\":["
+            + "{\"action\":\"open\",\"target\":\"Spotify\"},"
+            + "{\"action\":\"nonsense\",\"target\":\"whatever\"},"
+            + "{\"action\":\"media\",\"target\":\"next\"}"
+            + "]}\n\n");
+
+        Assert.Equal(
+            [new DesktopAction(DesktopActionKind.Open, "Spotify"), new DesktopAction(DesktopActionKind.Media, "next")],
+            answer.Actions);
     }
 }

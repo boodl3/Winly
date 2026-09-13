@@ -10,7 +10,7 @@ namespace Winly.Platform.Actions;
 /// is almost always what the user says, so it is matched first-class alongside the process name
 /// and the window title.
 /// </summary>
-internal static class AppMatcher
+public static class AppMatcher
 {
     /// <summary>Best windowed process for a spoken name, or null when nothing plausible is open.</summary>
     public static Process? FindWindowed(string spokenName)
@@ -42,6 +42,46 @@ internal static class AppMatcher
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// What the user could plausibly call the apps they have open, for the transcriber's key-term
+    /// list. Preferring the file description over the process name is the same reasoning as
+    /// <see cref="Score"/>: nobody says "msedge". Windowed processes only — a background service
+    /// is not something anyone asks Winly to act on.
+    /// </summary>
+    public static IReadOnlyList<string> WindowedAppNames()
+    {
+        Process[] running;
+        try
+        {
+            running = Process.GetProcesses();
+        }
+        catch (InvalidOperationException)
+        {
+            return [];
+        }
+
+        var names = new List<string>();
+        foreach (var process in running)
+        {
+            using (process)
+            {
+                if (!HasWindow(process))
+                {
+                    continue;
+                }
+
+                var description = Description(process);
+                var name = description.Length > 0 ? description : Safe(() => process.ProcessName);
+                if (name.Length > 0)
+                {
+                    names.Add(name);
+                }
+            }
+        }
+
+        return names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>Whether a process — identified by an audio session, say — is the named app.</summary>

@@ -23,9 +23,14 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
     private const string SpotifyProcessName = "Spotify";
 
     private static readonly TimeSpan LinkStatusFreshness = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ReadinessPollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MessageProbeTimeout = TimeSpan.FromMilliseconds(100);
 
     private MusicLinkStatus? _linkStatus;
     private DateTimeOffset _linkStatusAt = DateTimeOffset.MinValue;
+    private nint _typingTarget;
+
+    public void RememberTypingTarget() => _typingTarget = NativeDesktopMethods.GetForegroundWindow();
 
     public async Task<string?> Run(DesktopAction action, CancellationToken cancellationToken)
     {
@@ -54,18 +59,85 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
                 await SystemControl.Apply(action.Target, action.Amount, action.Relative, cancellationToken);
                 break;
             case DesktopActionKind.Type:
-                UserInputControl.Type(action.Target);
+                UserInputControl.Type(action.Target, _typingTarget);
                 break;
             case DesktopActionKind.Clipboard:
                 return Clipboard(action.Target);
             case DesktopActionKind.OpenPath:
                 OpenPath(action.Target);
                 break;
+            case DesktopActionKind.Click:
+                if (!await ScreenClickControl.TryClick(action.Target, action.Argument, _typingTarget, cancellationToken))
+                {
+                    throw new DesktopActionFailedException($"I couldn't find {action.Target} on your screen to click.");
+                }
+
+                break;
             default:
                 throw new DesktopActionFailedException("I don't know how to do that yet.");
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Waits until an application this request launched can actually be acted on.
+    ///
+    /// Deliberately matched against the live process list rather than against the <see cref="Process"/>
+    /// that <see cref="Process.Start(ProcessStartInfo)"/> handed back: Spotify, Discord, Teams and
+    /// every Electron application start a stub that spawns the real process and exits, so that
+    /// handle is dead within a second and never owned a window. Waiting on it looks like it works
+    /// and returns immediately for exactly the applications worth waiting for.
+    /// </summary>
+    public async Task<bool> WaitForApplicationReady(string appName, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (RespondsToMessages(AppMatcher.FindWindowed(appName)))
+            {
+                Log.Debug("{App} is ready to be acted on", appName);
+                return true;
+            }
+
+            await Task.Delay(ReadinessPollInterval, cancellationToken);
+        }
+
+        Log.Information("{App} did not become ready within {Seconds}s", appName, timeout.TotalSeconds);
+        return false;
+    }
+
+    /// <summary>
+    /// A window that exists is not the same as a window that is listening. WM_NULL does nothing at
+    /// the far end, so the only thing being tested is whether the reply comes back at all: a splash
+    /// screen or an application stuck on a modal update prompt never answers.
+    /// </summary>
+    private static bool RespondsToMessages(Process? process)
+    {
+        if (process is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var window = process.MainWindowHandle;
+            return window != nint.Zero
+                && NativeDesktopMethods.SendMessageTimeout(
+                    window,
+                    NativeDesktopMethods.NullMessage,
+                    0,
+                    0,
+                    NativeDesktopMethods.AbortIfHung,
+                    (uint)MessageProbeTimeout.TotalMilliseconds,
+                    out _) != nint.Zero;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or NotSupportedException)
+        {
+            // The process exited between being matched and being probed.
+            return false;
+        }
     }
 
     /// <summary>
@@ -277,11 +349,23 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
             return;
         }
 
-        // Not linked: the search screen at least lands in the app rather than a browser tab, and
-        // the spoken failure tells the user how to make the real thing work.
+        // Not linked. The desktop app is already signed in, so rather than asking the user to link
+        // the same account a second time, drive the window they already have: open the search and
+        // press the matching row's own play control.
         Log.Information("Spotify is not linked; opening a search for {Query}", spokenQuery);
         Launch($"spotify:search:{Uri.EscapeDataString(spokenQuery)}", spokenQuery);
-        throw new MusicNotLinkedException();
+
+        if (queueOnly)
+        {
+            // Queueing sits behind a row's context menu rather than a named control, so it is the
+            // one music verb still waiting on a walk of that menu.
+            throw new DesktopActionFailedException($"I've opened a search for {spokenQuery}, but I can't add things to the queue yet — only play them.");
+        }
+
+        if (!await SpotifyUiControl.TryPlaySearchResult(spokenQuery, cancellationToken))
+        {
+            throw new DesktopActionFailedException($"I opened a search for {spokenQuery} but couldn't tell which result you meant.");
+        }
     }
 
     /// <summary>
@@ -331,8 +415,12 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
 
     /// <summary>
     /// "Turn Spotify down" means Spotify's own slider, not the Windows mixer entry that attenuates
-    /// whatever it sends. When the account is linked the account API moves the real one; otherwise
-    /// this falls back to the mixer and says so is not possible, since the mixer still works.
+    /// whatever it sends. Three ways to reach it, best first: the account API when it is linked,
+    /// then the slider in Spotify's own window through UI Automation, and only then the mixer.
+    ///
+    /// The mixer is last because it is not the thing the user asked for. It leaves the slider they
+    /// are looking at exactly where it was, and it has no entry at all for an app that is not
+    /// currently making sound.
     /// </summary>
     private async Task SetVolume(string target, int amount, bool relative, CancellationToken cancellationToken)
     {
@@ -350,18 +438,26 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
             return;
         }
 
+        // The app's own slider, for the same reason Play drives the window rather than the API: no
+        // account to link, and it moves the control the user is actually looking at. UI Automation
+        // is a blocking COM client, so it stays off the sequence's thread.
+        if (isSpotify && await Task.Run(() => SpotifyUiControl.TrySetVolume(amount, relative), cancellationToken))
+        {
+            return;
+        }
+
         try
         {
             SetWindowsVolume(target, amount, relative);
         }
         catch (DesktopActionFailedException) when (isSpotify)
         {
-            // The mixer only has an entry for an app that is actually producing sound. Saying so
-            // without saying what would fix it is the unhelpful half of the truth.
+            // Both of the ways that move Spotify's own volume are gone and the mixer has no entry
+            // either, which only happens when its window is closed. Saying so without saying what
+            // would fix it is the unhelpful half of the truth.
             throw new DesktopActionFailedException(
-                "Spotify isn't playing anything for me to turn down through Windows, and I'm not "
-                + "connected to your Spotify account yet. Connect it in the Winly panel and I can "
-                + "set its own volume whether or not it's playing.");
+                "I couldn't reach Spotify's own volume, and it isn't playing anything for me to turn "
+                + "down through Windows either. Open its window and I can move its slider.");
         }
     }
 

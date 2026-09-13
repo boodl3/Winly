@@ -17,14 +17,21 @@ public sealed record ChatRequest(
     bool ScreenAvailable = false,
     bool WebSearchAllowed = false);
 
+/// <param name="Actions">
+/// Everything the model asked Winly to do, in the order it declared them. Never null; empty when
+/// the request was answer-only.
+/// </param>
 /// <param name="NeedsScreen">The model declined to answer without the screenshots it was not sent.</param>
 /// <param name="NeedsWebSearch">The model declined to answer without the web tool it was not given.</param>
 public sealed record ChatAnswer(
     string Text,
     PointingTarget? PointingTarget,
-    DesktopAction? Action = null,
+    IReadOnlyList<DesktopAction>? Actions = null,
     bool NeedsScreen = false,
-    bool NeedsWebSearch = false);
+    bool NeedsWebSearch = false)
+{
+    public IReadOnlyList<DesktopAction> Actions { get; init; } = Actions ?? [];
+}
 
 public interface IChatProvider
 {

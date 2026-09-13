@@ -56,6 +56,16 @@ public static unsafe partial class MonitorEnumerator
         return handles.Select(handle => Describe(handle, handle == cursorMonitor)).ToArray();
     }
 
+    /// <summary>Cursor position in physical virtual-screen pixels. Unlike <see cref="Enumerate"/> this is
+    /// a single syscall, so it is cheap enough to call once per rendered frame. False on the secure
+    /// desktop, where the caller should keep its last known position.</summary>
+    public static bool TryGetCursorPositionPx(out int x, out int y)
+    {
+        var ok = GetCursorPos(out var point);
+        (x, y) = (point.X, point.Y);
+        return ok;
+    }
+
     private static MonitorDescription Describe(nint handle, bool containsCursor)
     {
         var info = new MonitorInfoEx { Size = (uint)sizeof(MonitorInfoEx) };

@@ -45,6 +45,19 @@ internal static class WindowControl
         Log.Information("Window {Command} on {App}", command, appName);
     }
 
+    /// <summary>
+    /// Brings a window back and puts it in front, which is two separate problems.
+    ///
+    /// Un-minimising is easy. Being allowed to take the foreground is not: Windows grants that only
+    /// to the process that owns the current foreground window or has just received input, and Winly
+    /// is a tray app whose activation key is read through a global hook — the keystroke goes to
+    /// whatever the user was in, not to Winly. A bare SetForegroundWindow is therefore refused, and
+    /// a refusal does not look like one: the window is restored and its taskbar button flashes,
+    /// which reads as "open did nothing".
+    ///
+    /// So the result is checked rather than assumed, and on a refusal the two input queues are
+    /// joined for the length of one call, which is the documented way to ask on equal terms.
+    /// </summary>
     private static void Focus(nint window)
     {
         if (IsIconic(window))
@@ -52,9 +65,29 @@ internal static class WindowControl
             ShowWindow(window, ShowRestore);
         }
 
-        // Windows only honours this from a process with recent input. Winly always has some: the
-        // user just held the activation key. If it is refused the window still comes back restored.
-        SetForegroundWindow(window);
+        if (SetForegroundWindow(window) && GetForegroundWindow() == window)
+        {
+            return;
+        }
+
+        var ours = GetCurrentThreadId();
+        var theirs = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+        if (theirs == 0 || theirs == ours || !AttachThreadInput(ours, theirs, true))
+        {
+            BringWindowToTop(window);
+            return;
+        }
+
+        try
+        {
+            BringWindowToTop(window);
+            SetForegroundWindow(window);
+        }
+        finally
+        {
+            // Never left attached: two processes sharing an input queue is not a state to live in.
+            AttachThreadInput(ours, theirs, false);
+        }
     }
 
     private static void SnapTo(nint window, bool left)

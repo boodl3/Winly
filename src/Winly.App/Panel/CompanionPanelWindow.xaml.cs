@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using Winly.Core.Actions;
 using Winly.Core.Companion;
 using Winly.Core.Settings;
 
@@ -13,12 +14,18 @@ public partial class CompanionPanelWindow : Window
     private readonly CompanionOrchestrator _orchestrator;
     private readonly Func<UserSettings, Task> _applySettings;
     private readonly Func<Task> _connectMusic;
+    private readonly IActionRecord _actionRecord;
 
-    public CompanionPanelWindow(CompanionOrchestrator orchestrator, Func<UserSettings, Task> applySettings, Func<Task> connectMusic)
+    public CompanionPanelWindow(
+        CompanionOrchestrator orchestrator,
+        Func<UserSettings, Task> applySettings,
+        Func<Task> connectMusic,
+        IActionRecord actionRecord)
     {
         _orchestrator = orchestrator;
         _applySettings = applySettings;
         _connectMusic = connectMusic;
+        _actionRecord = actionRecord;
         InitializeComponent();
 
         var workArea = SystemParameters.WorkArea;
@@ -40,8 +47,36 @@ public partial class CompanionPanelWindow : Window
     public void ShowPanel()
     {
         LoadSettingsIntoControls(_orchestrator.Settings);
+        LoadActionRecord();
         Show();
         Activate();
+    }
+
+    /// <summary>
+    /// What Winly actually did, independently of what it said at the time (FR-024). Newest first,
+    /// so opening the panel after something surprising shows it without scrolling.
+    /// </summary>
+    private void LoadActionRecord()
+    {
+        var entries = _actionRecord.Read();
+        ActionRecordList.ItemsSource = entries.Count == 0
+            ? new[] { "Nothing yet." }
+            : entries.Select(Describe).ToArray();
+    }
+
+    private static string Describe(ActionRecordEntry entry)
+    {
+        var what = entry.Argument.Length == 0
+            ? $"{entry.Verb} {entry.Target}"
+            : $"{entry.Verb} {entry.Target} ({entry.Argument})";
+        var why = entry.Reason.Length == 0 ? string.Empty : $" — {entry.Reason}";
+        return $"{entry.TimestampUtc.ToLocalTime():g}  {what}: {entry.Status}{why}";
+    }
+
+    private void OnClearActionRecord(object sender, RoutedEventArgs e)
+    {
+        _actionRecord.Clear();
+        LoadActionRecord();
     }
 
     public void ShowState(CompanionState state)

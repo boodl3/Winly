@@ -29,3 +29,8 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Secrets written to a file only so wrangler can read them from stdin (never paste at its
+# masked prompt on Windows: Ctrl+V can insert a literal 0x16 instead of the key).
+token.txt
+key.txt

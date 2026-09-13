@@ -17,12 +17,15 @@ internal static class UserInputControl
     private const uint UnicodeTextFormat = 13; // CF_UNICODETEXT
     private const int MaxTypedCharacters = 4000;
 
-    public static void Type(string text)
+    /// <summary>Where the user was pointed when they asked. Zero means no target was recorded.</summary>
+    public static void Type(string text, nint intendedWindow)
     {
         if (text.Length > MaxTypedCharacters)
         {
             throw new DesktopActionFailedException("That's more text than I'll type in one go.");
         }
+
+        VerifyTarget(intendedWindow);
 
         // One down/up pair per UTF-16 unit, so surrogate pairs (emoji) arrive intact.
         var sequence = new SyntheticInput[text.Length * 2];
@@ -39,6 +42,57 @@ internal static class UserInputControl
         }
 
         Log.Information("Typed {Count} characters", text.Length);
+    }
+
+    /// <summary>
+    /// Checked immediately before the keystrokes go out, against the window that held focus when
+    /// the user started speaking — the only moment that corresponds to what they meant by "here".
+    /// Comparing against the foreground window at execution time would compare it to itself.
+    ///
+    /// A window can still take focus between this check and <c>SendInput</c>. Closing that window
+    /// needs BlockInput, which needs elevation, which Principle VIII forbids; the race is
+    /// microseconds wide and is accepted here rather than papered over.
+    /// </summary>
+    private static void VerifyTarget(nint intendedWindow)
+    {
+        if (intendedWindow == 0)
+        {
+            throw new DesktopActionFailedException("I lost track of where you wanted that typed, so I didn't type it.");
+        }
+
+        var focused = GetForegroundWindow();
+        if (focused != intendedWindow)
+        {
+            Log.Information("Typing abandoned: focus moved from {Intended} to {Focused}", intendedWindow, focused);
+            throw new DesktopActionFailedException("You moved to a different window, so I didn't type that anywhere.");
+        }
+
+        if (IsElevated(focused))
+        {
+            Log.Information("Typing abandoned: {Window} belongs to an elevated process", focused);
+            throw new DesktopActionFailedException("Windows won't let me type into that window.");
+        }
+    }
+
+    /// <summary>
+    /// SendInput reports success when UIPI silently drops the keystrokes into an elevated window,
+    /// so without this check a user typing into an elevated console would be told it worked.
+    /// </summary>
+    private static bool IsElevated(nint window)
+    {
+        if (GetWindowThreadProcessId(window, out var processId) == 0)
+        {
+            return true;
+        }
+
+        var handle = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (handle == 0)
+        {
+            return true;
+        }
+
+        CloseHandle(handle);
+        return false;
     }
 
     public static void Copy()

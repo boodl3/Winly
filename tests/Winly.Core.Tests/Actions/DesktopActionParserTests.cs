@@ -9,22 +9,31 @@ public class DesktopActionParserTests
     {
         var structured = new DesktopAction(DesktopActionKind.Open, "Spotify");
 
-        var (spoken, action) = DesktopActionParser.Parse(
-            "Opening Spotify. @@DO {\"action\":\"open\",\"target\":\"Spotify\"}@@", structured);
+        var (spoken, actions) = DesktopActionParser.Parse(
+            "Opening Spotify. @@DO {\"action\":\"open\",\"target\":\"Spotify\"}@@", [structured]);
 
         Assert.Equal("Opening Spotify.", spoken);
-        Assert.Same(structured, action);
+        Assert.Same(structured, Assert.Single(actions));
     }
 
     [Fact]
-    public void AnInBandTagIsRecoveredWhenTheStructuredActionIsMissing()
+    public void EveryTagIsStrippedSoASecondDesignationIsNeverReadAloudAsJson()
     {
-        var (spoken, action) = DesktopActionParser.Parse(
-            "Turning Spotify down.\n@@DO {\"action\":\"volume\",\"target\":\"spotify\",\"amount\":-20,\"relative\":true}@@",
-            structuredAction: null);
+        var (spoken, _) = DesktopActionParser.Parse(
+            "Done. @@DO {\"action\":\"open\",\"target\":\"Spotify\"}@@ @@DO {\"action\":\"play\",\"target\":\"jazz\"}@@",
+            structuredActions: []);
 
-        Assert.Equal("Turning Spotify down.", spoken);
-        Assert.Equal(new DesktopAction(DesktopActionKind.Volume, "spotify", Amount: -20, Relative: true), action);
+        Assert.DoesNotContain("@@DO", spoken, StringComparison.Ordinal);
+        Assert.Equal("Done.", spoken);
+    }
+
+    [Fact]
+    public void AnAnswerWithNoDesignationAtAllYieldsNoActions()
+    {
+        var (spoken, actions) = DesktopActionParser.Parse("That button saves your work.", structuredActions: []);
+
+        Assert.Equal("That button saves your work.", spoken);
+        Assert.Empty(actions);
     }
 
     [Fact]
@@ -85,10 +94,10 @@ public class DesktopActionParserTests
     [Fact]
     public void AMalformedTagIsStrippedEvenThoughNothingCanBeDoneWithIt()
     {
-        var (spoken, action) = DesktopActionParser.Parse("Sure thing. @@DO {oops}@@", structuredAction: null);
+        var (spoken, actions) = DesktopActionParser.Parse("Sure thing. @@DO {oops}@@", structuredActions: []);
 
         Assert.Equal("Sure thing.", spoken);
-        Assert.Null(action);
+        Assert.Empty(actions);
     }
 
     [Theory]

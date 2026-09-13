@@ -1,5 +1,44 @@
 <!--
 Sync Impact Report
+Version: 1.1.0 → 1.2.0
+Added principles: none
+Modified sections: VIII. Actions Are Opt-In, Ordered, and Bounded — the wall-clock
+  bound moves from the sequence to each action within it.
+Removed sections: none
+Rationale for MINOR bump: materially changes guidance within an existing principle
+  without removing or redefining it. Per-action bounds detect a hung action sooner
+  than an aggregate bound (a stuck readiness wait trips its own cap rather than
+  waiting out a sequence-wide budget), and do not cut off a legitimately slow
+  request because earlier actions were slow. The protection the principle exists
+  for — Winly can never sit silently busy forever — is preserved.
+Retroactive effect: feature 002's FR-004 was written against the previous wording
+  and carried a declared deviation in plan.md's Complexity Tracking. That deviation
+  is resolved by this amendment and its row is removed.
+Templates requiring review: none
+Follow-up TODOs: none
+
+---
+
+Sync Impact Report (superseded by above)
+Version: 1.0.0 → 1.1.0
+Added principles:
+  VIII. Actions Are Opt-In, Ordered, and Bounded
+Modified sections: Additional Constraints (added "Actuation capability ladder")
+Removed sections: none
+Rationale for MINOR bump: adds one principle and one constraint. Nothing previously
+permitted becomes forbidden for feature 001, which specifies no actuation at all.
+Retroactive effect: the desktop-action code already in src/Winly.Core/Actions,
+src/Winly.Platform/Actions and src/Winly.Providers/Music predates any governing
+principle or spec. Feature 002 brings it under governance; the gaps it is currently
+non-compliant on (no confirmation gate, no audit record, no declared bounds) are
+carried as that feature's requirements rather than as a separate remediation.
+Templates requiring review:
+  - plan-template.md → plans for features that act on the desktop MUST add a
+    Constitution Check row for Principle VIII
+Follow-up TODOs: none
+
+---
+Sync Impact Report (superseded by above)
 Version: 0.0.0 → 1.0.0 (initial ratification)
 Added principles:
   I. Secrets Never Ship in the Client
@@ -150,6 +189,45 @@ of the same severity as a crash.
 A silent failure is indistinguishable from the app being broken or uninstalled, and
 it is the most likely support burden the project will carry.
 
+### VIII. Actions Are Opt-In, Ordered, and Bounded
+
+This principle governs every feature where Winly changes the state of the user's
+machine rather than only observing it and speaking. It applies in addition to
+Principle II, which governs only what Winly is allowed to see and hear.
+
+Acting MUST be a separate opt-in from screen and microphone capture. Granting Winly
+sight or hearing MUST NOT grant it hands, and the setting MUST persist and be
+revocable at any time.
+
+Where a single request produces more than one action, those actions MUST run in the
+order the model declared, MUST stop at the first failure rather than continuing past
+it, and the user MUST be told which actions completed and which did not. A sequence
+MUST be bounded in count, and every action within it MUST be bounded in wall-clock
+duration; exceeding either bound stops the sequence and reports it.
+
+Any action that is irreversible, destructive, or externally consequential — closing a
+window that may hold unsaved work, putting the machine to sleep or locking it,
+sending text into whatever currently holds focus, deleting or overwriting anything —
+MUST be stated in plain language and explicitly confirmed before it runs. Confirmation
+is per action and per occurrence; it MUST NOT be remembered across sessions.
+
+Every action Winly performs MUST be recorded — what it was, what it targeted, whether
+it succeeded, and when — in a record the user can review independently of whatever was
+spoken at the time.
+
+Winly MUST NOT run elevated and MUST NOT attempt to escalate in order to act on an
+elevated target. Where the operating system refuses an action, that refusal MUST be
+reported plainly rather than retried silently.
+
+**Rationale:** Windows asks the user's permission for none of this. Synthetic input
+needs no consent prompt, no entitlement, and no capability declaration — so every
+limit here is one the project imposes on itself, because nothing else will. The
+specific risk is concrete rather than theoretical: the existing verb set can type
+arbitrary text into whichever window happens to hold focus, close an application
+holding unsaved work, and lock the machine. Chaining multiplies the blast radius of
+a single misheard sentence, which is precisely why ordering, stopping, bounding, and
+confirmation arrive in the same principle that permits chaining at all.
+
 ## Additional Constraints
 
 **Platform target.** Windows 10 version 1903 (build 18362) or later, x64. Features
@@ -167,6 +245,21 @@ consume measurable CPU. An always-resident companion that drains battery gets un
 **Provider substitutability.** Chat, speech-to-text, and text-to-speech MUST each sit
 behind an interface with at least the possibility of a second implementation. No
 vendor-specific type may appear in the core.
+
+**Actuation capability ladder.** When Winly acts on something, it MUST use the highest
+available rung of this ladder, and MUST NOT drop to a lower one where a higher one
+exists:
+
+1. A native or service API for the thing being controlled — the media transport, the
+   audio session, the shell, an application's own web API.
+2. Invocation of a named element through the accessibility tree.
+3. Synthetic keyboard input aimed at a focused window.
+4. Coordinate-based mouse input derived from a screenshot.
+
+Each rung down is less reliable, harder to verify, and more expensive to run. Rung 1
+either succeeds or returns an error the application can act on; rung 4 cannot tell a
+successful click from one that landed on nothing. A plan that reaches for a lower rung
+where a higher one exists MUST justify it in Complexity Tracking.
 
 ## Development Workflow
 
@@ -201,4 +294,4 @@ Complexity that violates a principle MUST be justified in writing in the plan's
 Complexity Tracking table, including what simpler alternative was rejected and why.
 "It was faster" is not a justification.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-12 | **Last Amended**: 2026-09-12
+**Version**: 1.2.0 | **Ratified**: 2026-09-12 | **Last Amended**: 2026-09-13

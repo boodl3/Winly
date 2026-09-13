@@ -46,7 +46,7 @@ public sealed class ProxyChatProvider(HttpClient httpClient, ProxyEndpointOption
     {
         var text = new StringBuilder();
         PointingTarget? target = null;
-        DesktopAction? action = null;
+        IReadOnlyList<DesktopAction> actions = [];
         var needsScreen = false;
         var needsWeb = false;
         await foreach (var data in ServerSentEventReader.ReadDataEvents(serverSentEvents, cancellationToken))
@@ -74,15 +74,25 @@ public sealed class ProxyChatProvider(HttpClient httpClient, ProxyEndpointOption
                     pointing.TryGetProperty("label", out var label) ? label.GetString() ?? string.Empty : string.Empty);
             }
 
-            if (root.TryGetProperty("action", out var actionElement) && actionElement.ValueKind == JsonValueKind.Object)
+            if (root.TryGetProperty("actions", out var actionsElement) && actionsElement.ValueKind == JsonValueKind.Array)
             {
-                action = DesktopActionParser.TryParseTag(actionElement.GetRawText());
+                var parsed = new List<DesktopAction>();
+                foreach (var element in actionsElement.EnumerateArray())
+                {
+                    var one = DesktopActionParser.TryParseTag(element.GetRawText());
+                    if (one is not null)
+                    {
+                        parsed.Add(one);
+                    }
+                }
+
+                actions = parsed;
             }
 
             needsScreen = root.TryGetProperty("needsScreen", out var asked) && asked.ValueKind == JsonValueKind.True;
             needsWeb = root.TryGetProperty("needsWebSearch", out var wanted) && wanted.ValueKind == JsonValueKind.True;
         }
 
-        return new ChatAnswer(text.ToString(), target, action, needsScreen, needsWeb);
+        return new ChatAnswer(text.ToString(), target, actions, needsScreen, needsWeb);
     }
 }

@@ -21,6 +21,7 @@ public class EmptyTranscriptGuardTests
     private readonly ICompanionOverlay _overlay = Substitute.For<ICompanionOverlay>();
     private readonly IDesktopActions _actions = Substitute.For<IDesktopActions>();
     private readonly ReminderScheduler _reminders = new();
+    private readonly IActionRecord _record = Substitute.For<IActionRecord>();
     private readonly ConversationSession _session = new();
 
     public EmptyTranscriptGuardTests()
@@ -157,7 +158,7 @@ public class EmptyTranscriptGuardTests
         _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("open spotify"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new ChatAnswer("Opening Spotify.", null, new DesktopAction(DesktopActionKind.Open, "Spotify"))));
+            .Returns(Task.FromResult(new ChatAnswer("Opening Spotify.", null, [new DesktopAction(DesktopActionKind.Open, "Spotify")])));
         var orchestrator = await StartedOrchestrator();
 
         _keys.KeyDown += Raise.Event<Action>();
@@ -176,7 +177,7 @@ public class EmptyTranscriptGuardTests
         _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("open spotty"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new ChatAnswer("Opening Spotty.", null, new DesktopAction(DesktopActionKind.Open, "Spotty"))));
+            .Returns(Task.FromResult(new ChatAnswer("Opening Spotty.", null, [new DesktopAction(DesktopActionKind.Open, "Spotty")])));
         _actions.Run(Arg.Any<DesktopAction>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromException<string?>(new DesktopActionFailedException("I couldn't find an app called Spotty.")));
         var orchestrator = await StartedOrchestrator();
@@ -200,7 +201,7 @@ public class EmptyTranscriptGuardTests
         _actions.CurrentlyPlaying(Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<NowPlaying?>(new NowPlaying("Spotify", "Alright", "Kendrick Lamar", IsPlaying: true)));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new ChatAnswer("Pausing it.", null, new DesktopAction(DesktopActionKind.Media, "pause"))));
+            .Returns(Task.FromResult(new ChatAnswer("Pausing it.", null, [new DesktopAction(DesktopActionKind.Media, "pause")])));
         var orchestrator = await StartedOrchestrator();
 
         _keys.KeyDown += Raise.Event<Action>();
@@ -220,7 +221,7 @@ public class EmptyTranscriptGuardTests
         _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("pause the song"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([Capture()]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(new ChatAnswer("Pausing it.", null, new DesktopAction(DesktopActionKind.Media, "pause"))));
+            .Returns(Task.FromResult(new ChatAnswer("Pausing it.", null, [new DesktopAction(DesktopActionKind.Media, "pause")])));
         var orchestrator = await StartedOrchestrator();
 
         _keys.KeyDown += Raise.Event<Action>();
@@ -265,7 +266,7 @@ public class EmptyTranscriptGuardTests
     {
         var orchestrator = new CompanionOrchestrator(
             _keys, _microphone, _displays, _speechToText, _chat, _textToSpeech, _playback, _overlay,
-            _actions, _reminders, _session, new UserSettings(), Logger.None);
+            _actions, _reminders, _record, _session, new UserSettings(), Logger.None);
         await orchestrator.Start(CancellationToken.None);
         return orchestrator;
     }

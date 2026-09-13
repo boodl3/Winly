@@ -9,6 +9,10 @@ export interface Env {
   // to what it can do locally.
   SPOTIFY_CLIENT_ID?: string;
   SPOTIFY_CLIENT_SECRET?: string;
+  // The shared token every desktop client presents. Not a third-party credential: it gates this
+  // Worker itself, so Principle I is untouched. Unset means every POST is refused, deliberately —
+  // an auth check that disappears when its secret is missing is the bug it was added to prevent.
+  WINLY_CLIENT_TOKEN?: string;
   // Non-secret vars from wrangler.toml.
   CHAT_MODEL: string;
   TEXT_TO_SPEECH_MODEL: string;
@@ -20,6 +24,7 @@ export interface Env {
 }
 
 type ErrorCode =
+  | "unauthorized"
   | "provider_unavailable"
   | "provider_timeout"
   | "invalid_request"
@@ -58,6 +63,7 @@ type DesktopActionKind =
   | "type"
   | "clipboard"
   | "openpath"
+  | "click"
   | "timer";
 
 const ACTION_KINDS: readonly string[] = [
@@ -71,6 +77,7 @@ const ACTION_KINDS: readonly string[] = [
   "type",
   "clipboard",
   "openpath",
+  "click",
   "timer",
 ];
 
@@ -92,8 +99,30 @@ interface PointingTarget {
 const UPSTREAM_TIMEOUT_MILLISECONDS = 12_000;
 const TRANSCRIBE_TOKEN_TTL_SECONDS = 60;
 const TRANSCRIBE_TOKEN_URL = `https://streaming.assemblyai.com/v3/token?expires_in_seconds=${TRANSCRIBE_TOKEN_TTL_SECONDS}`;
+// Short spoken commands are the hardest thing for a general transcriber: there is no sentence
+// around a word to disambiguate it, so one missed phoneme ("pin Claude" -> "pinch Claude") turns a
+// window command into nonsense that the chat model then answers as if it meant something. Every
+// lever here is free — they are query parameters, not extra requests.
+//   prompt        — free text, Universal-3.5 Pro only (the default model here). Says what kind of
+//                   utterance this is, which is what a human transcriptionist would be told.
+// The third lever, keyterms_prompt, is appended by the client rather than set here: half of it is
+// the names of the apps that are actually open, which only the desktop side knows.
+const TRANSCRIBE_PROMPT =
+  "The speaker is talking to a voice assistant on their Windows PC. Utterances are short spoken " +
+  "commands about applications, windows, volume, music and the screen, or short questions about " +
+  "what is on the screen. Prefer command words over similar-sounding ordinary words.";
 const TRANSCRIBE_STREAM_ENDPOINT =
-  "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true";
+  "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true" +
+  "&mode=max_accuracy" +
+  // Push-to-talk: the hold IS the utterance, so never let a thinking pause split it into two turns
+  // decoded independently of each other. "Pin Claude / to the left" split exactly there, and the
+  // first half alone is what "pin" was misheard in. 10 s is the parameter's ceiling; Terminate
+  // still finalizes the open turn when the key is released (measured, not assumed).
+  "&min_turn_silence=10000" +
+  // A desktop microphone hears the room: a fan, a second person, whatever is playing. near-field
+  // is the profile for someone sitting at the machine, which is the only way Winly is ever used.
+  "&voice_focus=near-field" +
+  `&prompt=${encodeURIComponent(TRANSCRIBE_PROMPT)}`;
 const DEFAULT_TEXT_TO_SPEECH_OUTPUT_FORMAT = "pcm_24000";
 const textToSpeechUrl = (voiceId: string, outputFormat: string) =>
   `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream` +
@@ -112,11 +141,11 @@ After your spoken answer, on a new final line, write exactly one pointing design
 @@POINT {"monitorId":"<display id>","x":<integer>,"y":<integer>,"label":"<short name of the element>"}@@ — when the answer concerns one specific on-screen element. x and y are pixel coordinates inside that display's attached image (0,0 is the top-left corner; each image's size is stated next to it).
 @@NOPOINT@@ — when no single element is relevant, and always when no screenshots are attached.
 
-When the user asked you to DO something on their computer rather than only answer it, add one action designation on the line after that, and say in your spoken answer that you are doing it. Every action takes this shape, with only the fields that verb needs:
+When the user asked you to DO something on their computer rather than only answer it, add an action designation on the line after that — one for each separate thing they asked for — and say in your spoken answer that you are doing it. Every action takes this shape, with only the fields that verb needs:
 @@DO {"action":"<verb>","target":"<string>","argument":"<string>","amount":<number>,"relative":<true or false>}@@
 
 The verbs:
-"open" — target is an installed app's plain name (Spotify, Notepad, Chrome) or an http(s) URL. Launches or browses.
+"open" — target is an installed app's plain name (Spotify, Notepad, Chrome) or an http(s) URL. Launches it, or brings it to the front if it is already running, so use it even when the app is only minimised.
 "play" — target is a song, artist or album in plain words. Plays it on the user's Spotify. Give only what they named: no URL, no quotes, no "on Spotify".
 "queue" — same as play, but adds to the queue instead of interrupting.
 "media" — target is playpause, play, pause, next, previous, stop, shuffle or repeat. Reaches whatever is playing.
@@ -126,6 +155,7 @@ The verbs:
 "type" — target is the literal text to type into whatever the user is focused on. Use it only when they clearly dictated something to be typed.
 "clipboard" — target is read (say the clipboard aloud) or copy (copy the current selection).
 "openpath" — target is a file or folder name to find under the user's own profile and open.
+"click" — target is the visible label of something on their screen to press: a video on a results page, a link, a button, a row. Argument is the app it is in (Edge, Chrome, Spotify) or empty for whatever they are looking at. Copy the label off the screenshot as exactly as you can read it — that text is matched against the real control, so "Procreate Tutorial for Beginners" finds it and "the first video" does not. This is the only verb that reaches something that is merely on screen; it needs the screenshots, so ask for them with @@NEEDSCREEN@@ if they are not attached.
 "timer" — amount is how many seconds from now, target is what the timer is for. "Remind me in 20 minutes to stretch" is amount 1200, target "stretch".
 
 Worked examples, spoken request on the left and the designation it deserves on the right:
@@ -149,13 +179,22 @@ Worked examples, spoken request on the left and the designation it deserves on t
 "what's on my clipboard" -> @@DO {"action":"clipboard","target":"read"}@@
 "type out dear Sam, thanks for the update" -> @@DO {"action":"type","target":"Dear Sam, thanks for the update"}@@
 "open my tax folder" -> @@DO {"action":"openpath","target":"tax"}@@
+"play the first Procreate video" -> @@DO {"action":"click","target":"<the first result's title, read off the screenshot>","argument":"Edge"}@@ — a video on a page is a click, never "play"
+"click the accept button" -> @@DO {"action":"click","target":"Accept","argument":""}@@
+"open the second search result" -> @@DO {"action":"click","target":"<that result's title, read off the screenshot>","argument":"Chrome"}@@
 "remind me in twenty minutes to stretch" -> @@DO {"action":"timer","target":"stretch","amount":1200}@@
 "what does this button do" -> no action designation at all, just the pointing one
 "how much is this going to cost me" -> no action designation at all
 
-Add an action designation only when the user actually asked for something to happen; a question about what is on screen is not a request to act. Only ever write one. Never mention any designation line in the spoken answer.
+What you are given is speech recognition output, so a word is sometimes misheard. If a request is one small sound away from a plain command — "pinch Claude to the left" for "pin Claude to the left" — act on the command it obviously meant. If you genuinely cannot tell what was asked, say you did not catch that and ask them to say it again: never assemble an answer out of unrelated things on the screen to have something to say.
 
-Two mistakes to avoid: reaching for "open" with a music URL when the user wants to hear something (that is what "play" is for), and giving an absolute volume when the user said louder or quieter (that is what "relative" is for).
+Add an action designation only when the user actually asked for something to happen; a question about what is on screen is not a request to act. Never mention any designation line in the spoken answer.
+
+One hold of the key is one utterance, and people put several jobs in it. Write a separate designation for every single thing they asked for, in the order they need to happen — an app has to be opened before it can be asked to do anything — up to a maximum of ten. "open spotify and play some jazz" is two: open, then play. "open spotify, put on some jazz, throw chrome on the left and turn dark mode on" is four. Do not merge two jobs into one designation, and do not quietly drop the last one because the request was long. Many requests are still just one.
+
+Say only what you actually wrote a designation for. If you did not emit an action, do not say the thing is done, opening, playing or "should be up" — say plainly that you cannot do that part, or ask what they meant. Winly tells the user itself when an action fails, so an honest "I'm opening it" is right even if it turns out not to work; a claim with no designation behind it is always wrong.
+
+Three mistakes to avoid: reaching for "open" with a music URL when the user wants to hear something (that is what "play" is for), giving an absolute volume when the user said louder or quieter (that is what "relative" is for), and using "play" for anything that is not music on Spotify — a video, a file or anything visible on the screen is "click" or "openpath".
 
 If a line saying what is playing is attached below, trust it over the screenshots for questions about the current song, and for aiming playback controls.
 
@@ -174,6 +213,39 @@ function errorResponse(error: ErrorCode, status: number): Response {
   return jsonResponse({ error }, status);
 }
 
+/**
+ * Whether the request carries the shared client token.
+ *
+ * ponytail: one shared token, extractable from any copy of the client binary. It closes the
+ * actual exposure — the Worker URL leaking into a log, a screenshot or a repo lets a stranger
+ * spend the provider credits — and raises control of a linked Spotify account from "learn an
+ * install id" to "learn an install id AND hold the binary". It does NOT survive public
+ * distribution: before release this wants per-install tokens minted behind a real sign-in.
+ *
+ * Exported for index.test.ts.
+ */
+export function isAuthorized(request: Request, env: Env): boolean {
+  const expected = env.WINLY_CLIENT_TOKEN;
+  if (!expected) {
+    console.log("auth.unconfigured");
+    return false;
+  }
+
+  const header = request.headers.get("Authorization") ?? "";
+  const presented = header.startsWith("Bearer ") ? header.slice(7) : "";
+
+  // Constant-time over the expected length. Leaking whether the lengths match is harmless;
+  // leaking how many leading characters were right is the thing worth not doing.
+  if (presented.length !== expected.length) {
+    return false;
+  }
+  let difference = 0;
+  for (let i = 0; i < expected.length; i += 1) {
+    difference |= presented.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return difference === 0;
+}
+
 function isTimeout(error: unknown): boolean {
   return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
@@ -182,8 +254,11 @@ function isTimeout(error: unknown): boolean {
  * Separates narration from the trailing designations while text is still streaming.
  * Text before any "@@" is safe to forward immediately; everything from the first "@@"
  * onward is held until the stream ends so a partially received tag is never spoken.
+ *
+ * Exported only so index.test.ts can reach it: this is the sole place designations are parsed,
+ * the desktop client trusting whatever comes out of it rather than re-deriving anything.
  */
-class DesignationSplitter {
+export class DesignationSplitter {
   private pending = "";
 
   push(text: string): string {
@@ -207,7 +282,7 @@ class DesignationSplitter {
   finish(): {
     trailingText: string;
     pointingTarget: PointingTarget | null;
-    action: DesktopAction | null;
+    actions: DesktopAction[];
     needsScreen: boolean;
     needsWebSearch: boolean;
   } {
@@ -229,23 +304,28 @@ class DesignationSplitter {
       }
     }
 
-    let action: DesktopAction | null = null;
-    const actionMatch = /@@DO\s*(\{[\s\S]*?\})\s*@@/.exec(this.pending);
-    if (actionMatch) {
+    // Every designation, in the order the model wrote them. Each is validated on its own, so a
+    // malformed one is discarded while the valid ones around it survive — one bad tag must never
+    // void a whole sequence. Not capped here: the client caps and is the only side that can tell
+    // the user its request was truncated, which capping here would hide from it (FR-003).
+    const actions: DesktopAction[] = [];
+    const actionTag = /@@DO\s*(\{[\s\S]*?\})\s*@@/g;
+    let actionMatch: RegExpExecArray | null;
+    while ((actionMatch = actionTag.exec(this.pending)) !== null) {
       try {
         const parsed = JSON.parse(actionMatch[1]) as Partial<DesktopAction>;
         if (typeof parsed.action === "string" && ACTION_KINDS.includes(parsed.action)) {
           const relative = parsed.relative === true;
-          action = {
+          actions.push({
             action: parsed.action as DesktopActionKind,
             target: typeof parsed.target === "string" ? parsed.target.trim() : "",
             argument: typeof parsed.argument === "string" ? parsed.argument.trim() : "",
             amount: Number.isFinite(parsed.amount) ? Math.round(parsed.amount as number) : 0,
             relative,
-          };
+          });
         }
       } catch {
-        // Malformed tag: no action is taken, and the text is dropped below.
+        // Malformed tag: this one designation is discarded; the rest of the sequence stands.
       }
     }
 
@@ -261,7 +341,7 @@ class DesignationSplitter {
       .replace(/@+\s*$/, "")
       .trimEnd();
     this.pending = "";
-    return { trailingText, pointingTarget, action, needsScreen, needsWebSearch };
+    return { trailingText, pointingTarget, actions, needsScreen, needsWebSearch };
   }
 }
 
@@ -381,11 +461,11 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
         // Mid-stream failure: finish with whatever narration arrived rather than leaving the client hanging.
       }
       console.log("chat.usage", JSON.stringify(usage));
-      const { trailingText, pointingTarget, action, needsScreen, needsWebSearch } = splitter.finish();
+      const { trailingText, pointingTarget, actions, needsScreen, needsWebSearch } = splitter.finish();
       if (trailingText.length > 0 && !needsScreen && !needsWebSearch) {
         send({ delta: trailingText });
       }
-      send({ done: true, pointingTarget, action, needsScreen, needsWebSearch });
+      send({ done: true, pointingTarget, actions, needsScreen, needsWebSearch });
       controller.close();
     },
   });
@@ -846,6 +926,12 @@ export default {
 
     if (request.method !== "POST") {
       return errorResponse("invalid_request", 405);
+    }
+
+    // Every POST spends money — provider credits, or someone's Spotify account. One gate, above
+    // the routing table, so a route added later cannot be added unprotected.
+    if (!isAuthorized(request, env)) {
+      return errorResponse("unauthorized", 401);
     }
 
     try {

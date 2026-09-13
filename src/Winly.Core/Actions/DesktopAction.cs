@@ -36,6 +36,9 @@ public enum DesktopActionKind
     /// <summary>Target: a file or folder to find under the user's profile and open.</summary>
     OpenPath,
 
+    /// <summary>Target: the visible label of an on-screen control. Argument: the app it is in, or empty for the foreground one.</summary>
+    Click,
+
     /// <summary>Target: what the timer is for. Amount: how many seconds from now.</summary>
     Timer,
 }
@@ -90,4 +93,20 @@ public interface IDesktopActions
 
     /// <summary>Never throws: no player, or no permission to ask, is simply nothing playing.</summary>
     Task<NowPlaying?> CurrentlyPlaying(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Waits until an application launched earlier in the same request can actually be acted on,
+    /// which is not the same as its process existing (FR-005). Returns false when
+    /// <paramref name="timeout"/> passes without it becoming ready; never throws for that case,
+    /// because "it never finished starting" is an ordinary outcome rather than an error.
+    /// </summary>
+    Task<bool> WaitForApplicationReady(string appName, TimeSpan timeout, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Records where the user's attention was at the moment they started speaking, so a later
+    /// <see cref="DesktopActionKind.Type"/> can verify it is still there before sending anything
+    /// (FR-016). Called at activation start, before Winly speaks or acts — that instant is the only
+    /// one that corresponds to what the user meant by "here".
+    /// </summary>
+    void RememberTypingTarget();
 }
