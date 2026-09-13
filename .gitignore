@@ -34,3 +34,6 @@ Thumbs.db
 # masked prompt on Windows: Ctrl+V can insert a literal 0x16 instead of the key).
 token.txt
 key.txt
+
+# Local project context for Claude, not part of the repo
+CLAUDE.md
