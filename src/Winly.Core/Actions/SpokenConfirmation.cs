@@ -31,17 +31,31 @@ public static partial class SpokenConfirmation
     ];
 
     /// <summary>True only for a clear yes. Everything else, including nothing at all, is a no.</summary>
-    public static bool IsAgreement(string? transcript)
+    public static bool IsAgreement(string? transcript) => Decide(transcript) == true;
+
+    /// <summary>
+    /// The answer if this transcript already contains one, or null while it still might. Same
+    /// reading as <see cref="IsAgreement"/>, but it separates "they said no" from "they have not
+    /// said anything yet" — which is what lets the microphone close the moment the word lands
+    /// rather than at the end of the window. Silence is only a refusal once the window is spent,
+    /// so that distinction has to survive all the way out to the caller.
+    /// </summary>
+    public static bool? Decide(string? transcript)
     {
         var words = Normalise(transcript);
         if (words.Length == 0)
         {
-            return false;
+            return null;
         }
 
         // Refusals are tested first because a refusal often contains an agreement phrase inside it:
         // "no, don't do it" ends with "do it".
-        return !ContainsAny(words, Refusals) && ContainsAny(words, Agreements);
+        if (ContainsAny(words, Refusals))
+        {
+            return false;
+        }
+
+        return ContainsAny(words, Agreements) ? true : null;
     }
 
     [GeneratedRegex(@"[\p{L}\p{N}]+")]

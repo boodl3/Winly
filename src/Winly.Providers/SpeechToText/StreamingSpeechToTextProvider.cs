@@ -46,7 +46,7 @@ public sealed class StreamingSpeechToTextProvider(
     // it — truncating silently would drop verbs off the end and nothing would say so.
     private const int MaxAppKeyTerms = 40;
 
-    public async Task<string> Transcribe(Stream pcm16MonoAudio, CancellationToken cancellationToken)
+    public async Task<string> Transcribe(Stream pcm16MonoAudio, CancellationToken cancellationToken, Action<string>? onPartial = null)
     {
         var token = await tokenClient.Mint(cancellationToken);
         var separator = token.Endpoint.Contains('?') ? '&' : '?';
@@ -58,7 +58,7 @@ public sealed class StreamingSpeechToTextProvider(
 
         var turns = new SortedDictionary<int, string>();
         var sending = SendAudio(socket, pcm16MonoAudio, cancellationToken);
-        var receiving = ReceiveTurns(socket, turns, sending, cancellationToken);
+        var receiving = ReceiveTurns(socket, turns, sending, onPartial, cancellationToken);
         await Task.WhenAll(sending, receiving);
 
         if (socket.State == WebSocketState.Open)
@@ -116,7 +116,12 @@ public sealed class StreamingSpeechToTextProvider(
         await socket.SendAsync(TerminateMessage, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
     }
 
-    private static async Task ReceiveTurns(ClientWebSocket socket, SortedDictionary<int, string> turns, Task sending, CancellationToken cancellationToken)
+    private static async Task ReceiveTurns(
+        ClientWebSocket socket,
+        SortedDictionary<int, string> turns,
+        Task sending,
+        Action<string>? onPartial,
+        CancellationToken cancellationToken)
     {
         var buffer = new byte[64 * 1024];
         using var message = new MemoryStream();
@@ -151,6 +156,15 @@ public sealed class StreamingSpeechToTextProvider(
             if (type == "Turn" && root.TryGetProperty("turn_order", out var order))
             {
                 turns[order.GetInt32()] = root.TryGetProperty("transcript", out var transcript) ? transcript.GetString() ?? string.Empty : string.Empty;
+
+                // A listener never gets to fail the transcription it is only observing.
+                try
+                {
+                    onPartial?.Invoke(string.Join(' ', turns.Values.Where(turn => turn.Length > 0)));
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                }
 
                 // The Termination message trails the finished transcript by a round trip that buys
                 // nothing: once Terminate has gone out and the hold's single turn has come back

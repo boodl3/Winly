@@ -41,11 +41,9 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
                 Open(action.Target);
                 break;
             case DesktopActionKind.Play:
-                await Play(action.Target, queueOnly: false, cancellationToken);
-                break;
+                return await Play(action.Target, action.Argument, queueOnly: false, cancellationToken);
             case DesktopActionKind.Queue:
-                await Play(action.Target, queueOnly: true, cancellationToken);
-                break;
+                return await Play(action.Target, action.Argument, queueOnly: true, cancellationToken);
             case DesktopActionKind.Media:
                 await ControlMedia(action.Target, cancellationToken);
                 break;
@@ -340,13 +338,28 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
 
     // ---- music ---------------------------------------------------------------------------
 
-    private async Task Play(string spokenQuery, bool queueOnly, CancellationToken cancellationToken)
+    private async Task<string?> Play(string spokenQuery, string service, bool queueOnly, CancellationToken cancellationToken)
     {
+        // "Play X on YouTube" used to open Spotify and play something else entirely, because every
+        // play went to the one service Winly can drive from the inside. Honouring the name the
+        // user actually said matters more than how well Winly can drive what they asked for.
+        if (MusicServiceRouter.Route(service, spokenQuery) is { } elsewhere)
+        {
+            var (spokenName, url) = elsewhere;
+            Launch(url, $"{spokenName} search for {spokenQuery}");
+            Log.Information("Opened a {Service} search for {Query}", spokenName, spokenQuery);
+
+            // ponytail: opens the search and stops there. Pressing the first result wants the page
+            // to have rendered and a label to match it by, which is the click verb's job and needs
+            // the model to read one off a screenshot — a second round trip this path does not have.
+            return $"I've opened {spokenName} and searched for {spokenQuery} — pick the one you want, or tell me which and I'll press it.";
+        }
+
         if ((await LinkStatus(cancellationToken)).IsLinked)
         {
             var started = await music.Play(spokenQuery, queueOnly, cancellationToken);
             Log.Information("{Verb} {Track}", queueOnly ? "Queued" : "Playing", started);
-            return;
+            return null;
         }
 
         // Not linked. The desktop app is already signed in, so rather than asking the user to link
@@ -366,6 +379,8 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
         {
             throw new DesktopActionFailedException($"I opened a search for {spokenQuery} but couldn't tell which result you meant.");
         }
+
+        return null;
     }
 
     /// <summary>

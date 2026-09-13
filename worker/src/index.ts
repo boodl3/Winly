@@ -108,9 +108,12 @@ const TRANSCRIBE_TOKEN_URL = `https://streaming.assemblyai.com/v3/token?expires_
 // The third lever, keyterms_prompt, is appended by the client rather than set here: half of it is
 // the names of the apps that are actually open, which only the desktop side knows.
 const TRANSCRIBE_PROMPT =
-  "The speaker is talking to a voice assistant on their Windows PC. Utterances are short spoken " +
-  "commands about applications, windows, volume, music and the screen, or short questions about " +
-  "what is on the screen. Prefer command words over similar-sounding ordinary words.";
+  "The speaker is talking to a voice assistant on their Windows PC. Utterances are spoken commands " +
+  "about applications, windows, volume, music and the screen, or questions about what is on the " +
+  "screen. The speaker often talks quickly and chains several instructions into one breath, " +
+  "separated by commas or by 'and', with words running together and word endings clipped; " +
+  "transcribe the whole utterance rather than stopping at the first instruction. Prefer command " +
+  "words over similar-sounding ordinary words.";
 const TRANSCRIBE_STREAM_ENDPOINT =
   "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true" +
   "&mode=max_accuracy" +
@@ -119,6 +122,17 @@ const TRANSCRIBE_STREAM_ENDPOINT =
   // first half alone is what "pin" was misheard in. 10 s is the parameter's ceiling; Terminate
   // still finalizes the open turn when the key is released (measured, not assumed).
   "&min_turn_silence=10000" +
+  // min_turn_silence is only the floor before an end-of-turn check is *run*. Two other levers end a
+  // turn on their own and both default to ending it early: max_turn_silence forces one after 1536 ms
+  // of silence whatever the minimum says, and end_of_turn_confidence_threshold ends one at 0.4 when
+  // the words merely *sound* finished. Someone rattling off "open Spotify, put some jazz on, and
+  // throw Chrome on the left" trips both — a breath between jobs, and clauses that each parse as a
+  // complete sentence. A split there is not just two decodes instead of one: the two finals overlap,
+  // so the joined transcript duplicates words, and the client's single-turn fast path is refused, so
+  // it costs latency too. Nothing here is lost by refusing to end turns: this is push-to-talk, and
+  // releasing the key sends Terminate, which finalizes the turn regardless of either threshold.
+  "&max_turn_silence=10000" +
+  "&end_of_turn_confidence_threshold=0.9" +
   // A desktop microphone hears the room: a fan, a second person, whatever is playing. near-field
   // is the profile for someone sitting at the machine, which is the only way Winly is ever used.
   "&voice_focus=near-field" +
@@ -127,6 +141,23 @@ const DEFAULT_TEXT_TO_SPEECH_OUTPUT_FORMAT = "pcm_24000";
 const textToSpeechUrl = (voiceId: string, outputFormat: string) =>
   `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream` +
   `?output_format=${encodeURIComponent(outputFormat)}`;
+
+// An answer is synthesized one sentence at a time so playback can start before the model has
+// finished writing it, which leaves every chunk sounding like the opening of a fresh announcement:
+// the voice resets its pitch and pace at each seam. `previous_text` is what it just said — free
+// context, since only `text` is billed — so the delivery carries across the seam instead.
+const TEXT_TO_SPEECH_CONTEXT_CHARACTERS = 500;
+export function textToSpeechBody(text: string, previousText: string | undefined, model: string) {
+  return {
+    text,
+    model_id: model,
+    ...(previousText ? { previous_text: previousText.slice(-TEXT_TO_SPEECH_CONTEXT_CHARACTERS) } : {}),
+    // A one-word chunk ("Done.") carries no evidence of what language it is in, and a mis-detection
+    // is audible. Only the v2.5 models accept the hint — the others answer 400 for an unknown field.
+    // ponytail: English-only app; this becomes a var the day Winly speaks anything else.
+    ...(model.endsWith("_v2_5") ? { language_code: "en" } : {}),
+  };
+}
 
 const SPOTIFY_SCOPES = "user-read-playback-state user-modify-playback-state";
 const SPOTIFY_API = "https://api.spotify.com/v1";
@@ -146,7 +177,7 @@ When the user asked you to DO something on their computer rather than only answe
 
 The verbs:
 "open" — target is an installed app's plain name (Spotify, Notepad, Chrome) or an http(s) URL. Launches it, or brings it to the front if it is already running, so use it even when the app is only minimised.
-"play" — target is a song, artist or album in plain words. Plays it on the user's Spotify. Give only what they named: no URL, no quotes, no "on Spotify".
+"play" — target is a song, artist or album in plain words: only what they named, no URL and no quotes. Argument is the service they named out loud — YouTube, YouTube Music, Apple Music, SoundCloud, Tidal, Deezer, Bandcamp, Amazon Music — and empty when they named none, which means Spotify. Put the service in the argument and leave it out of the target. Only Spotify actually starts playing; the rest open that service's own search, which Winly says out loud, so never claim a track is playing on one of them.
 "queue" — same as play, but adds to the queue instead of interrupting.
 "media" — target is playpause, play, pause, next, previous, stop, shuffle or repeat. Reaches whatever is playing.
 "volume" — target is an app's name, or "spotify" for the music itself, or empty for the whole system. With "relative":true, amount is a step added to the current volume — the only way to express "turn it down", since you cannot read the current level. Use about -20 for a nudge down, +20 for up, -40 for "much quieter". With "relative":false, amount is an absolute 0-100.
@@ -165,6 +196,7 @@ Worked examples, spoken request on the left and the designation it deserves on t
 "mute it" -> @@DO {"action":"system","target":"mute"}@@
 "put on some Radiohead" -> @@DO {"action":"play","target":"Radiohead"}@@
 "play Bohemian Rhapsody on Spotify" -> @@DO {"action":"play","target":"Bohemian Rhapsody"}@@
+"play lofi beats on YouTube" -> @@DO {"action":"play","target":"lofi beats","argument":"YouTube"}@@ — the service goes in the argument, never in the target
 "add this to the queue, Weightless by Marconi Union" -> @@DO {"action":"queue","target":"Weightless Marconi Union"}@@
 "pause the song" -> @@DO {"action":"media","target":"pause"}@@
 "next song" -> @@DO {"action":"media","target":"next"}@@
@@ -476,15 +508,16 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleTextToSpeech(request: Request, env: Env): Promise<Response> {
-  let body: { text?: unknown };
+  let body: { text?: unknown; previousText?: unknown };
   try {
-    body = await request.json<{ text?: unknown }>();
+    body = await request.json<{ text?: unknown; previousText?: unknown }>();
   } catch {
     return errorResponse("invalid_request", 400);
   }
   if (typeof body.text !== "string" || body.text.trim() === "") {
     return errorResponse("invalid_request", 400);
   }
+  const previousText = typeof body.previousText === "string" ? body.previousText : undefined;
 
   const outputFormat = env.TEXT_TO_SPEECH_OUTPUT_FORMAT || DEFAULT_TEXT_TO_SPEECH_OUTPUT_FORMAT;
   let upstream: Response;
@@ -495,10 +528,7 @@ async function handleTextToSpeech(request: Request, env: Env): Promise<Response>
         "xi-api-key": env.TEXT_TO_SPEECH_PROVIDER_API_KEY.trim(),
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        text: body.text,
-        model_id: env.TEXT_TO_SPEECH_MODEL,
-      }),
+      body: JSON.stringify(textToSpeechBody(body.text, previousText, env.TEXT_TO_SPEECH_MODEL)),
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MILLISECONDS),
     });
   } catch (error) {

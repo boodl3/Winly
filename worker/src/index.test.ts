@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DesignationSplitter, isAuthorized, type Env } from "./index";
+import { DesignationSplitter, isAuthorized, textToSpeechBody, type Env } from "./index";
 
 /**
  * The designation parser is the only place actions are extracted: the desktop client carries
@@ -99,5 +99,27 @@ describe("isAuthorized", () => {
   it("refuses everything when no token is configured", () => {
     expect(ask(undefined, "Bearer anything")).toBe(false);
     expect(ask("", "Bearer ")).toBe(false);
+  });
+});
+
+describe("textToSpeechBody", () => {
+  it("carries what was already spoken, so the voice does not restart at every sentence seam", () => {
+    const body = textToSpeechBody("It also closes the dialog.", "It saves your file. ", "eleven_flash_v2_5");
+
+    expect(body.previous_text).toBe("It saves your file. ");
+    expect(body.language_code).toBe("en");
+  });
+
+  it("omits the context on the first chunk, and the language hint on a model that would reject it", () => {
+    const body = textToSpeechBody("It saves your file.", undefined, "eleven_multilingual_v2");
+
+    expect(body).not.toHaveProperty("previous_text");
+    expect(body).not.toHaveProperty("language_code");
+  });
+
+  it("sends only the tail of a long answer as context", () => {
+    const body = textToSpeechBody("And that is it.", "x".repeat(900), "eleven_flash_v2_5");
+
+    expect(body.previous_text).toHaveLength(500);
   });
 });

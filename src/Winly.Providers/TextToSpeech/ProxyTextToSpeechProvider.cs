@@ -10,10 +10,10 @@ namespace Winly.Providers.TextToSpeech;
 /// </summary>
 public sealed class ProxyTextToSpeechProvider(HttpClient httpClient, ProxyEndpointOptions endpoint) : ITextToSpeechProvider
 {
-    public async Task<SpokenAudio> Synthesize(string spokenText, CancellationToken cancellationToken)
+    public async Task<SpokenAudio> Synthesize(string spokenText, string? previousText, CancellationToken cancellationToken)
     {
         var route = endpoint.Resolve("tts");
-        using var request = new HttpRequestMessage(HttpMethod.Post, route) { Content = JsonContent.Create(new { text = spokenText }) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, route) { Content = JsonContent.Create(new { text = spokenText, previousText }) };
         var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         try
         {

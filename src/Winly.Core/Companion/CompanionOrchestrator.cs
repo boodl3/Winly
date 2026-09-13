@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Threading.Channels;
 using Serilog;
 using Winly.Core.Abstractions;
@@ -45,6 +46,14 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
 
     private CancellationTokenSource? _currentActivation;
     private TaskCompletionSource? _keyReleased;
+
+    /// <summary>
+    /// Playback of the answer currently being spoken, so anything Winly wants to say *about* that
+    /// answer can wait for it instead of talking over it. One output device is shared by the whole
+    /// app and each Play stops the last, so two overlapping speakers do not mix — they chop each
+    /// other into fragments, which is what a confirmation question sounded like.
+    /// </summary>
+    private Task _answerSpeech = Task.CompletedTask;
 
     public CompanionOrchestrator(
         IActivationKeyMonitor activationKeys,
@@ -124,14 +133,33 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
     /// <summary>Speaks something Winly initiated rather than answered, such as a timer coming due.</summary>
     public async Task Announce(string text, CancellationToken cancellationToken)
     {
-        Post(text);
         var spoken = AnswerTextSanitizer.Sanitize(text);
         if (spoken.Length == 0)
         {
+            Post(text);
             return;
         }
 
-        var audio = await _textToSpeech.Synthesize(spoken, cancellationToken);
+        // Every announcement is something Winly starts saying on its own — a confirmation
+        // question, a failed action, a timer — and all three can land while an answer is still
+        // playing. Waiting is the whole fix for the confirmation prompt "spasming": it was spoken
+        // over the answer, and each kept stopping the other's device mid-word. The answer's own
+        // failures belong to the path that owns it, so they are swallowed rather than reported
+        // twice.
+        try
+        {
+            await _answerSpeech;
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _log.Debug(failure, "The answer being spoken ended badly; announcing anyway");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        Post(text);
+
+        // Whole text in one go, so there is no earlier chunk for the voice to carry on from.
+        var audio = await _textToSpeech.Synthesize(spoken, null, cancellationToken);
         await _playback.Play(audio, cancellationToken);
     }
 
@@ -212,6 +240,11 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             // "here" if this turn out to be a typing request (FR-016).
             _actions.RememberTypingTarget();
 
+            // The activation this one just replaced may still hold the device — a confirmation
+            // window is the normal way that happens — and StartCapture throws on a second opener.
+            // Idempotent when nothing is open, so it costs nothing on the ordinary path.
+            await _microphone.StopCapture();
+
             var audio = await _microphone.StartCapture(cancellationToken);
             var transcription = _speechToText.Transcribe(audio, cancellationToken);
 
@@ -228,16 +261,21 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             var nowPlaying = _actions.CurrentlyPlaying(cancellationToken);
             Observe(nowPlaying);
 
+            long releasedAt;
             try
             {
                 await WaitForKeyRelease(keyReleased, cancellationToken);
             }
             finally
             {
+                // Stamped at key release, before the microphone closes rather than after. Closing it
+                // now waits for the recorder to hand back the frames it had already captured, and
+                // stamping afterwards hid that wait in an unmeasured gap — the transcript stage read
+                // 0.09 ms on a real turn, which is not a fast transcriber, it is a stopwatch started
+                // late. SC-001 measures key release to first spoken word, so this is where it starts.
+                releasedAt = Stopwatch.GetTimestamp();
                 await _microphone.StopCapture();
             }
-
-            var releasedAt = Stopwatch.GetTimestamp();
 
             // Before the transcript, not after it: the microphone is already closed, so leaving the
             // Listening indicator up would keep showing a capture badge for something that is no
@@ -265,6 +303,11 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             var queuedAnySpeech = false;
             long firstDeltaAt = 0;
 
+            // Everything already handed to synthesis, so each chunk knows what the voice just said
+            // and carries its delivery across the seam instead of opening a fresh announcement.
+            // Only ever touched from the SSE loop's own thread, so a plain local is enough.
+            var spokenSoFar = new StringBuilder();
+
             void QueueSpeech(string sentence)
             {
                 var spoken = AnswerTextSanitizer.Sanitize(sentence);
@@ -274,7 +317,9 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                 }
 
                 queuedAnySpeech = true;
-                speechQueue.Writer.TryWrite(_textToSpeech.Synthesize(spoken, cancellationToken));
+                var previous = spokenSoFar.Length == 0 ? null : spokenSoFar.ToString();
+                spokenSoFar.Append(spoken).Append(' ');
+                speechQueue.Writer.TryWrite(_textToSpeech.Synthesize(spoken, previous, cancellationToken));
             }
 
             // Synthesis of later sentences overlaps playback of earlier ones, so the answer
@@ -305,6 +350,7 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                     }
                 },
                 cancellationToken);
+            _answerSpeech = speaking;
 
             void OnDelta(string delta)
             {
@@ -392,9 +438,16 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             Session.Append(new Exchange(transcript, spokenText, targetCapture is null ? null : target, DateTimeOffset.UtcNow));
             Finish(activation);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (Exception failure) when (cancellationToken.IsCancellationRequested)
         {
-            _log.Information("Activation abandoned by a newer activation");
+            // Any exception, not just OperationCanceledException. Superseding an activation aborts
+            // a websocket and an audio device mid-flight, and those layers surface the teardown as
+            // whatever they happen to throw — the transcriber's send and receive share one socket,
+            // so whichever notices the abort second reports a WebSocketException, not a
+            // cancellation. That was logged as "Activation failed" and told the user "I can't
+            // reach the answer service" about a request they had already replaced, while the
+            // replacement was running perfectly well behind the message.
+            _log.Information(failure, "Activation abandoned by a newer activation");
         }
         catch (Exception failure)
         {
@@ -479,15 +532,44 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             // activation rather than a lifecycle change, and the indicator is what Principle II
             // actually requires while the microphone is open.
             _overlay.SetState(CompanionState.Listening);
+            await _microphone.StopCapture();
             var audio = await _microphone.StartCapture(listening.Token);
-            var transcribing = _speechToText.Transcribe(audio, listening.Token);
+
+            // "Yes" is decidable from the first partial the transcriber revises, so the window
+            // stops being a wait and becomes only a deadline: the answer lands about as fast as
+            // the user says it, instead of four seconds after. Without this the user says yes,
+            // hears nothing, and says it again into a microphone that is still counting down.
+            var decided = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var transcribing = _speechToText.Transcribe(
+                audio,
+                listening.Token,
+                partial =>
+                {
+                    if (SpokenConfirmation.Decide(partial) is bool answer)
+                    {
+                        decided.TrySetResult(answer);
+                    }
+                });
 
             // The window ends the *capture*, exactly as releasing the key does on a normal turn —
             // it must not cancel the transcription. Cancelling threw the answer away instead of
             // reading it, and the transcriber only finalizes a turn once the audio stream ends, so
             // every confirmation timed out and every spoken "yes" was recorded as a refusal.
-            await Task.Delay(ConfirmationWindow, listening.Token);
+            var window = Task.Delay(ConfirmationWindow, listening.Token);
+            Observe(window);
+            await Task.WhenAny(decided.Task, window);
             await _microphone.StopCapture();
+
+            if (decided.Task.IsCompletedSuccessfully)
+            {
+                // Heard it outright; the finalized transcript would only say the same thing a
+                // round trip later. Cancelling here is what closes the socket that is still open.
+                var heard = decided.Task.Result;
+                _log.Information("Confirmation for {Kind} heard as {Answer}", action.Kind, heard ? "yes" : "no");
+                listening.Cancel();
+                Observe(transcribing);
+                return heard;
+            }
 
             var answer = await transcribing;
             _log.Information("Confirmation for {Kind} heard as {Answer}", action.Kind, answer);

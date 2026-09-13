@@ -9,10 +9,14 @@ public enum DesktopActionKind
     /// <summary>Target: an installed app's name, or an http(s) URL.</summary>
     Open,
 
-    /// <summary>Target: a song, artist or album in plain words. Plays it on Spotify.</summary>
+    /// <summary>
+    /// Target: a song, artist or album in plain words. Argument: the service the user named
+    /// (YouTube, Apple Music, SoundCloud, …), or empty for Spotify, which is the only one Winly
+    /// can press play inside rather than merely search.
+    /// </summary>
     Play,
 
-    /// <summary>Target: a song, artist or album in plain words. Adds it to the Spotify queue.</summary>
+    /// <summary>Target: a song, artist or album in plain words. Argument: as for Play.</summary>
     Queue,
 
     /// <summary>Target: playpause, play, pause, next, previous, stop, shuffle or repeat.</summary>

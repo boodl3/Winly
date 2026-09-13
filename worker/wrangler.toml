@@ -15,8 +15,8 @@ enabled = true
 [vars]
 CHAT_MODEL = "claude-sonnet-5"
 TEXT_TO_SPEECH_MODEL = "eleven_flash_v2_5"
-# ElevenLabs voice id — "Rachel", a premade voice. Swap for your own from the ElevenLabs dashboard.
-TEXT_TO_SPEECH_VOICE = "21m00Tcm4TlvDq8ikWAM"
+# ElevenLabs voice id. Swap for your own from the ElevenLabs dashboard.
+TEXT_TO_SPEECH_VOICE = "rfkTsdZrVWEVhDycUYn9"
 # Raw PCM so the client can play the answer as it arrives; "mp3_44100_128" also works.
 TEXT_TO_SPEECH_OUTPUT_FORMAT = "pcm_24000"
 # Server-side web search, for questions whose answer changes. 0 turns the tool off.

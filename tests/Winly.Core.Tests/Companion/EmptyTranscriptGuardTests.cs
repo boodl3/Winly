@@ -27,7 +27,7 @@ public class EmptyTranscriptGuardTests
     public EmptyTranscriptGuardTests()
     {
         _microphone.StartCapture(Arg.Any<CancellationToken>()).Returns(Task.FromResult<Stream>(new MemoryStream()));
-        _textToSpeech.Synthesize(Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _textToSpeech.Synthesize(Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(_ => Task.FromResult(new SpokenAudio(new MemoryStream(), 24000)));
     }
 
@@ -37,7 +37,7 @@ public class EmptyTranscriptGuardTests
     [InlineData("\n\t")]
     public async Task EmptyTranscriptIssuesNoRequestAndReturnsToIdle(string transcript)
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult(transcript));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult(transcript));
         var orchestrator = await StartedOrchestrator();
 
         _keys.KeyDown += Raise.Event<Action>();
@@ -55,7 +55,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task NonEmptyTranscriptRunsTheWholeLoopAndRecordsTheExchange()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("what is this button"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("what is this button"));
         var capture = new DisplayCapture("m1", [], 1568, 882, true, new MonitorGeometry(0, 0, 3136, 1764, 2.0));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([capture]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
@@ -80,7 +80,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task NewActivationAbandonsTheRequestInFlight()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("first question"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("first question"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         var chatInFlight = new TaskCompletionSource<ChatAnswer>(TaskCreationOptions.RunContinuationsAsynchronously);
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
@@ -107,7 +107,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task ProviderFailureSurfacesAPlainMessageAndReturnsToIdle()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("hello"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("hello"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
             .Returns<ChatAnswer>(_ => throw new ProviderFailureException("provider_unavailable"));
@@ -126,7 +126,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task SpeaksTheFirstSentenceBeforeTheAnswerFinishesStreaming()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("what is this button"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("what is this button"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         var answerFinished = new TaskCompletionSource<ChatAnswer>(TaskCreationOptions.RunContinuationsAsynchronously);
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
@@ -142,7 +142,7 @@ public class EmptyTranscriptGuardTests
 
         // The whole point of the pipeline: audio is playing while the model is still writing.
         await WaitUntil(() => orchestrator.StateMachine.State == CompanionState.Speaking);
-        await _textToSpeech.Received().Synthesize("It saves your file.", Arg.Any<CancellationToken>());
+        await _textToSpeech.Received().Synthesize("It saves your file.", Arg.Any<string?>(), Arg.Any<CancellationToken>());
         await _playback.Received().Play(Arg.Any<SpokenAudio>(), Arg.Any<CancellationToken>());
 
         answerFinished.SetResult(new ChatAnswer("It saves your file.", null));
@@ -153,9 +153,33 @@ public class EmptyTranscriptGuardTests
     }
 
     [Fact]
+    public async Task EachSentenceAfterTheFirstCarriesWhatWasAlreadySpoken()
+    {
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("what is this button"));
+        _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
+        const string answer = "It saves your file. It also closes the dialog.";
+        _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                callInfo.Arg<Action<string>>()(answer + " ");
+                return Task.FromResult(new ChatAnswer(answer, null));
+            });
+        var orchestrator = await StartedOrchestrator();
+
+        _keys.KeyDown += Raise.Event<Action>();
+        _keys.KeyUp += Raise.Event<Action>();
+        await orchestrator.CurrentRun;
+
+        // Without this the voice restarts its intonation at the seam and one answer reads as two
+        // announcements; the context is free (only `text` is billed), so it is always sent.
+        await _textToSpeech.Received().Synthesize("It saves your file.", null, Arg.Any<CancellationToken>());
+        await _textToSpeech.Received().Synthesize("It also closes the dialog.", "It saves your file. ", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task AnActionDesignationIsCarriedOutWhileTheAnswerIsSpoken()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("open spotify"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("open spotify"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new ChatAnswer("Opening Spotify.", null, [new DesktopAction(DesktopActionKind.Open, "Spotify")])));
@@ -174,7 +198,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task AFailedActionSurfacesItsOwnSentenceAndStillFinishesTheAnswer()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("open spotty"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("open spotty"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new ChatAnswer("Opening Spotty.", null, [new DesktopAction(DesktopActionKind.Open, "Spotty")])));
@@ -196,7 +220,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task WhatIsPlayingTravelsWithTheQuestion()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("pause the song"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("pause the song"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([]));
         _actions.CurrentlyPlaying(Arg.Any<CancellationToken>())
             .Returns(Task.FromResult<NowPlaying?>(new NowPlaying("Spotify", "Alright", "Kendrick Lamar", IsPlaying: true)));
@@ -218,7 +242,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task ACommandIsAskedWithoutScreenshotsAtAll()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("pause the song"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("pause the song"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([Capture()]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(new ChatAnswer("Pausing it.", null, [new DesktopAction(DesktopActionKind.Media, "pause")])));
@@ -238,7 +262,7 @@ public class EmptyTranscriptGuardTests
     [Fact]
     public async Task AModelThatAsksForTheScreenIsGivenItWithoutCapturingAgain()
     {
-        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>()).Returns(Task.FromResult("open the thing"));
+        _speechToText.Transcribe(Arg.Any<Stream>(), Arg.Any<CancellationToken>(), Arg.Any<Action<string>?>()).Returns(Task.FromResult("open the thing"));
         _displays.CaptureAll(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<DisplayCapture>>([Capture()]));
         _chat.Ask(Arg.Any<ChatRequest>(), Arg.Any<Action<string>>(), Arg.Any<CancellationToken>())
             .Returns(

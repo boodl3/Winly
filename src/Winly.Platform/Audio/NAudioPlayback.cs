@@ -56,7 +56,14 @@ public sealed class NAudioPlayback : IAudioPlayback
             _source = source;
         }
 
-        using var cancellation = cancellationToken.Register(() => _ = Stop());
+        using var cancellation = cancellationToken.Register(() =>
+        {
+            _ = StopIfCurrent(output);
+
+            // Disposing a WaveOut can swallow the PlaybackStopped that completes this, and nothing
+            // else ever completes it — an abandoned answer would hold its task forever.
+            finished.TrySetResult();
+        });
         try
         {
             output.Play();
@@ -64,18 +71,31 @@ public sealed class NAudioPlayback : IAudioPlayback
         }
         finally
         {
-            await Stop();
+            // Its own device, never simply "whatever is playing". One WaveOut is shared by the
+            // whole app, so an answer that is being abandoned used to tear down the *replacement*
+            // answer on its way out: press the key again mid-sentence and the new reply was cut
+            // off by the old one finishing its finally. Losing the race is the common case, not
+            // the rare one, because stopping the old device is what starts the new request.
+            await StopIfCurrent(output);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
     }
 
-    public Task Stop()
+    /// <summary>Stops whatever is playing, whoever started it.</summary>
+    public Task Stop() => StopIfCurrent(null);
+
+    private Task StopIfCurrent(WaveOut? expected)
     {
         WaveOut? output;
         IDisposable? source;
         lock (_gate)
         {
+            if (expected is not null && !ReferenceEquals(_output, expected))
+            {
+                return Task.CompletedTask;
+            }
+
             output = _output;
             source = _source;
             _output = null;
