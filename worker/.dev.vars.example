@@ -1,0 +1,4 @@
+# Copy to `.dev.vars` (git-ignored) for `wrangler dev`. Placeholders only — never commit real values.
+CHAT_PROVIDER_API_KEY=replace-with-anthropic-api-key
+SPEECH_TO_TEXT_PROVIDER_API_KEY=replace-with-assemblyai-api-key
+TEXT_TO_SPEECH_PROVIDER_API_KEY=replace-with-elevenlabs-api-key

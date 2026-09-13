@@ -1,0 +1,8 @@
+﻿[
+  {"delta":"Hello"},
+  {"delta":" world"}
+  
+{"delta":"multi"}
+{"delta":"line"},
+  {"done":true,"pointingTarget":null}
+]

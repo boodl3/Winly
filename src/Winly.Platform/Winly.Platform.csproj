@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 22621 projection so GraphicsCaptureSession.IsBorderRequired is visible; it is runtime-guarded. -->
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <!-- Screen capture needs 19041 (research.md §1); older builds still start and report capture unavailable at runtime. -->
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Winly.Core\Winly.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="3.1.0" />
+    <!-- The only interface that reaches an internal panel's backlight is WMI. -->
+    <PackageReference Include="System.Management" Version="9.0.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+  </ItemGroup>
+
+</Project>

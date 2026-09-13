@@ -1,0 +1,29 @@
+# Non-secret configuration only. Provider API keys are Worker secrets:
+#   wrangler secret put CHAT_PROVIDER_API_KEY
+#   wrangler secret put SPEECH_TO_TEXT_PROVIDER_API_KEY
+#   wrangler secret put TEXT_TO_SPEECH_PROVIDER_API_KEY
+# See README.md.
+
+name = "winly-backend"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[vars]
+CHAT_MODEL = "claude-sonnet-5"
+TEXT_TO_SPEECH_MODEL = "eleven_flash_v2_5"
+# ElevenLabs voice id — "Rachel", a premade voice. Swap for your own from the ElevenLabs dashboard.
+TEXT_TO_SPEECH_VOICE = "21m00Tcm4TlvDq8ikWAM"
+# Raw PCM so the client can play the answer as it arrives; "mp3_44100_128" also works.
+TEXT_TO_SPEECH_OUTPUT_FORMAT = "pcm_24000"
+# Server-side web search, for questions whose answer changes. 0 turns the tool off.
+WEB_SEARCH_MAX_USES = "2"
+
+# Each install's Spotify refresh token. Never leaves the Worker; the client holds only an
+# opaque install id (Constitution Principle I).
+[[kv_namespaces]]
+binding = "MUSIC_TOKENS"
+id = "ad0f2161eabb4ca3a0f26bfc4aa4f288"
