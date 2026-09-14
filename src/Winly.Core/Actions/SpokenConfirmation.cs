@@ -30,15 +30,12 @@ public static partial class SpokenConfirmation
         "never mind", "nevermind", "leave it", "forget it", "wait",
     ];
 
-    /// <summary>True only for a clear yes. Everything else, including nothing at all, is a no.</summary>
-    public static bool IsAgreement(string? transcript) => Decide(transcript) == true;
-
     /// <summary>
-    /// The answer if this transcript already contains one, or null while it still might. Same
-    /// reading as <see cref="IsAgreement"/>, but it separates "they said no" from "they have not
-    /// said anything yet" — which is what lets the microphone close the moment the word lands
-    /// rather than at the end of the window. Silence is only a refusal once the window is spent,
-    /// so that distinction has to survive all the way out to the caller.
+    /// The answer if this transcript already contains one, or null while it still might. Only a
+    /// clear yes is true; everything else, silence included, is a refusal by the time the window is
+    /// spent — but "they said no" and "they have not said anything yet" stay separate all the way
+    /// out to the caller, because that is what lets the microphone close the moment the word lands
+    /// rather than at the end of the window. So a caller with no window left reads `== true`.
     /// </summary>
     public static bool? Decide(string? transcript)
     {

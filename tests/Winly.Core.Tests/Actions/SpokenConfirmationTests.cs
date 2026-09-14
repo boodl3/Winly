@@ -2,6 +2,7 @@ using Winly.Core.Actions;
 
 namespace Winly.Core.Tests.Actions;
 
+/// <summary>Decide keeps "no" and "nothing yet" apart; a spent window reads both as `!= true`.</summary>
 public class SpokenConfirmationTests
 {
     [Theory]
@@ -17,7 +18,7 @@ public class SpokenConfirmationTests
     [InlineData("yes, go ahead")]
     [InlineData("yeah that's fine")]
     public void AClearYesIsAgreement(string transcript) =>
-        Assert.True(SpokenConfirmation.IsAgreement(transcript));
+        Assert.True(SpokenConfirmation.Decide(transcript));
 
     [Theory]
     [InlineData("no")]
@@ -28,7 +29,7 @@ public class SpokenConfirmationTests
     [InlineData("never mind")]
     [InlineData("wait")]
     public void AClearNoIsARefusal(string transcript) =>
-        Assert.False(SpokenConfirmation.IsAgreement(transcript));
+        Assert.False(SpokenConfirmation.Decide(transcript));
 
     /// <summary>
     /// Silence is the ordinary outcome here, not an edge case: the user walked away, or the room is
@@ -39,7 +40,7 @@ public class SpokenConfirmationTests
     [InlineData("   ")]
     [InlineData(null)]
     public void NothingHeardAtAllIsARefusal(string? transcript) =>
-        Assert.False(SpokenConfirmation.IsAgreement(transcript));
+        Assert.NotEqual(true, SpokenConfirmation.Decide(transcript));
 
     [Theory]
     [InlineData("what time is the meeting")]
@@ -47,7 +48,7 @@ public class SpokenConfirmationTests
     [InlineData("the yellow one")]
     [InlineData("Jess can you pass me that")]
     public void AnythingNotRecognisedAsAgreementIsARefusal(string transcript) =>
-        Assert.False(SpokenConfirmation.IsAgreement(transcript));
+        Assert.NotEqual(true, SpokenConfirmation.Decide(transcript));
 
     /// <summary>A refusal very often contains an agreement phrase inside it.</summary>
     [Theory]
@@ -55,14 +56,14 @@ public class SpokenConfirmationTests
     [InlineData("no go ahead and leave it")]
     [InlineData("cancel, do it later")]
     public void ARefusalWinsOverAnAgreementPhraseBuriedInsideIt(string transcript) =>
-        Assert.False(SpokenConfirmation.IsAgreement(transcript));
+        Assert.False(SpokenConfirmation.Decide(transcript));
 
     /// <summary>"now" must never be heard as "no".</summary>
     [Theory]
     [InlineData("yes do it now")]
     [InlineData("okay now")]
     public void AWordThatMerelyContainsNoIsNotARefusal(string transcript) =>
-        Assert.True(SpokenConfirmation.IsAgreement(transcript));
+        Assert.True(SpokenConfirmation.Decide(transcript));
 
     [Fact]
     public void TheWindowIsShortEnoughNotToHoldTheMicrophoneOpen() =>

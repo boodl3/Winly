@@ -150,11 +150,13 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
         {
             await _answerSpeech;
         }
-        catch (Exception failure) when (failure is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        catch (Exception failure)
         {
             _log.Debug(failure, "The answer being spoken ended badly; announcing anyway");
         }
 
+        // Covers the cancellation the catch above just swallowed: an abandoned activation
+        // announces nothing.
         cancellationToken.ThrowIfCancellationRequested();
         Post(text);
 
@@ -571,9 +573,12 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                 return heard;
             }
 
+            // Nothing decidable inside the window: silence or something unrecognisable, both
+            // refusals, which is what `== true` collapses them into (FR-012b). The transcript goes
+            // in the log because a refusal and a misheard yes look identical from the outside.
             var answer = await transcribing;
             _log.Information("Confirmation for {Kind} heard as {Answer}", action.Kind, answer);
-            return SpokenConfirmation.IsAgreement(answer);
+            return SpokenConfirmation.Decide(answer) == true;
         }
         catch (Exception failure) when (failure is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {

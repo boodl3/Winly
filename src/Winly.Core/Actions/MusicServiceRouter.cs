@@ -15,19 +15,18 @@ namespace Winly.Core.Actions;
 /// </summary>
 public static class MusicServiceRouter
 {
-    // Longest names first: "youtube music" has to win over "youtube", which is a substring of it.
-    private static readonly (string Name, string SpokenName, string SearchUrl)[] Services =
+    // Matched on the spoken name itself: the Worker's prompt enumerates exactly these, and the
+    // model copies one into the argument. Longest first, so "YouTube Music" beats "YouTube".
+    private static readonly (string SpokenName, string SearchUrl)[] Services =
     [
-        ("youtube music", "YouTube Music", "https://music.youtube.com/search?q={0}"),
-        ("ytmusic", "YouTube Music", "https://music.youtube.com/search?q={0}"),
-        ("apple music", "Apple Music", "https://music.apple.com/search?term={0}"),
-        ("amazon music", "Amazon Music", "https://music.amazon.com/search/{0}"),
-        ("soundcloud", "SoundCloud", "https://soundcloud.com/search/sounds?q={0}"),
-        ("bandcamp", "Bandcamp", "https://bandcamp.com/search?q={0}"),
-        ("deezer", "Deezer", "https://www.deezer.com/search/{0}"),
-        ("tidal", "Tidal", "https://tidal.com/search?q={0}"),
-        ("youtube", "YouTube", "https://www.youtube.com/results?search_query={0}"),
-        ("yt", "YouTube", "https://www.youtube.com/results?search_query={0}"),
+        ("YouTube Music", "https://music.youtube.com/search?q={0}"),
+        ("Apple Music", "https://music.apple.com/search?term={0}"),
+        ("Amazon Music", "https://music.amazon.com/search/{0}"),
+        ("SoundCloud", "https://soundcloud.com/search/sounds?q={0}"),
+        ("Bandcamp", "https://bandcamp.com/search?q={0}"),
+        ("Deezer", "https://www.deezer.com/search/{0}"),
+        ("Tidal", "https://tidal.com/search?q={0}"),
+        ("YouTube", "https://www.youtube.com/results?search_query={0}"),
     ];
 
     /// <summary>
@@ -38,15 +37,15 @@ public static class MusicServiceRouter
     /// </summary>
     public static (string SpokenName, string Url)? Route(string? service, string spokenQuery)
     {
-        var named = (service ?? string.Empty).Trim().ToLowerInvariant();
+        var named = (service ?? string.Empty).Trim();
         if (named.Length == 0)
         {
             return null;
         }
 
-        foreach (var (name, spokenName, searchUrl) in Services)
+        foreach (var (spokenName, searchUrl) in Services)
         {
-            if (named.Contains(name, StringComparison.Ordinal))
+            if (named.Contains(spokenName, StringComparison.OrdinalIgnoreCase))
             {
                 return (spokenName, string.Format(searchUrl, Uri.EscapeDataString(spokenQuery)));
             }

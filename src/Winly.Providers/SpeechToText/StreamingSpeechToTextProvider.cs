@@ -75,8 +75,12 @@ public sealed class StreamingSpeechToTextProvider(
             }
         }
 
-        return string.Join(' ', turns.Values.Where(turn => turn.Length > 0));
+        return Joined(turns);
     }
+
+    /// <summary>The turns so far as one transcript — read for each partial, and once at the end.</summary>
+    private static string Joined(SortedDictionary<int, string> turns) =>
+        string.Join(' ', turns.Values.Where(turn => turn.Length > 0));
 
     private IReadOnlyList<string> ReadAppNames()
     {
@@ -157,14 +161,7 @@ public sealed class StreamingSpeechToTextProvider(
             {
                 turns[order.GetInt32()] = root.TryGetProperty("transcript", out var transcript) ? transcript.GetString() ?? string.Empty : string.Empty;
 
-                // A listener never gets to fail the transcription it is only observing.
-                try
-                {
-                    onPartial?.Invoke(string.Join(' ', turns.Values.Where(turn => turn.Length > 0)));
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                }
+                onPartial?.Invoke(Joined(turns));
 
                 // The Termination message trails the finished transcript by a round trip that buys
                 // nothing: once Terminate has gone out and the hold's single turn has come back
