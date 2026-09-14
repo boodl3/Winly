@@ -24,7 +24,11 @@ public static class FailureMessages
         ProviderFailureException { Reason: "provider_timeout" } => "That took too long. Please try again.",
         ProviderFailureException { Reason: "invalid_request" } => "I couldn't make sense of that request. Please try again.",
         ProviderFailureException => "The answer service isn't available right now.",
-        HttpRequestException or WebSocketException => "I can't reach the answer service. Check your connection and try again.",
+        HttpRequestException => "I can't reach the answer service. Check your connection and try again.",
+        // The only websocket in the client is the transcriber's, so this is never the answer
+        // service. Blaming it sent a session to check a backend that was fine while the listening
+        // side was the half that dropped — and the log it was reading said so.
+        WebSocketException => "I lost you while you were speaking. Please say that again.",
         TimeoutException or TaskCanceledException => "That took too long. Please try again.",
         _ => "Something went wrong on my end. Please try again.",
     };

@@ -47,4 +47,15 @@ public class FailureMessageMappingTests
     [Fact]
     public void TimeoutReasonsGetTheTryAgainMessage() =>
         Assert.Equal(FailureMessages.For(new TimeoutException()), FailureMessages.For(new ProviderFailureException("provider_timeout")));
+
+    // A dropped transcription websocket used to say "I can't reach the answer service", which is a
+    // different provider entirely and sends whoever hears it to check the wrong one.
+    [Fact]
+    public void ALostTranscriptionDoesNotBlameTheAnswerService()
+    {
+        var transcription = FailureMessages.For(new WebSocketException("The remote party closed the WebSocket connection"));
+
+        Assert.NotEqual(FailureMessages.For(new HttpRequestException("No such host is known")), transcription);
+        Assert.DoesNotContain("answer service", transcription);
+    }
 }
