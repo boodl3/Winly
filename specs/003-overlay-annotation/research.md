@@ -138,7 +138,12 @@ second path.
 **Rationale.**
 
 - Escape already means "dismiss this" everywhere in Windows. Nothing needs teaching.
-- The hook exists. No second global hook, no new interop, no new failure mode at startup.
+- The hook class exists and is already generic over key combinations, so Escape is a second
+  instance of it started with `Escape` rather than anything new: no new interop, and a failure
+  to install it at startup cannot take the activation key down with it. It is a second hook
+  thread, which is the whole of its cost — `IActivationKeyMonitor` reports only the combination
+  it was started with, and widening that interface to carry an arbitrary key would put a
+  dismissal gesture inside the activation path.
 - Non-consuming matters, and is the same rule 001's FR-003 already applies to the activation
   key: Escape must still reach the application underneath, or Winly would silently break
   every dialog on the machine while an annotation happened to be up.
