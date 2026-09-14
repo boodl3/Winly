@@ -6,164 +6,279 @@ using Winly.Core.Providers;
 namespace Winly.Platform.Audio;
 
 /// <summary>
-/// Plays what <c>/tts</c> returned through the default output device. Raw PCM plays straight off
-/// the network stream as it arrives; MP3 has to be buffered whole before NAudio can index it.
+/// Plays what <c>/tts</c> returned through the default output device.
 /// </summary>
-public sealed class NAudioPlayback : IAudioPlayback
+/// <remarks>
+/// <para>
+/// One output device is created for the life of the process and every clip is appended to its
+/// buffer. It used to be a fresh <see cref="WaveOut"/> per clip, and because an answer is
+/// synthesised a sentence at a time, that meant opening and closing the audio device between
+/// every sentence of every answer. That one decision produced three separate symptoms that each
+/// looked like its own bug:
+/// </para>
+/// <list type="bullet">
+/// <item>a gap at every sentence boundary, because a new device has to buffer 150 ms before it
+/// makes a sound;</item>
+/// <item>the first syllable of an answer clipped, because closing the outgoing device contended
+/// with the incoming one starting;</item>
+/// <item>a device leaked on every superseded playback, because the guard that stopped an
+/// abandoned answer tearing down its replacement also skipped disposing its own.</item>
+/// </list>
+/// <para>
+/// Measured before this change, over ~35 activations: idle CPU 4.2 % to 12.6 % of a core, +378
+/// handles, +15 threads. Keeping one device removes the cause rather than guarding each symptom.
+/// </para>
+/// <para>
+/// Ownership is a generation counter rather than a reference check. The device is shared, so
+/// "stop" from a new activation must silence the old answer without the old answer's own teardown
+/// then silencing the new one — the same race <c>StopIfCurrent</c> existed for, expressed once
+/// here instead of at each call site. A <see cref="Play"/> whose generation has moved on returns
+/// without touching the buffer.
+/// </para>
+/// </remarks>
+public sealed class NAudioPlayback : IAudioPlayback, IDisposable
 {
-    // 3 x 50 ms: playback starts on 150 ms of audio rather than the 300 ms default.
-    private const int BufferMilliseconds = 50;
-    private const int BufferCount = 3;
+    // 3 x 50 ms: playback starts on 150 ms of audio rather than NAudio's 300 ms default.
+    private const int DeviceBufferMilliseconds = 50;
+    private const int DeviceBufferCount = 3;
+
+    // How far ahead of the speakers the pump is allowed to get. Without a ceiling a long answer
+    // would buffer the whole of itself, and abandoning it would then have to discard seconds of
+    // audio that had already been paid for.
+    private static readonly TimeSpan MaxBufferedAhead = TimeSpan.FromSeconds(2);
+
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(15);
 
     private readonly object _gate = new();
-    private WaveOut? _output;
-    private IDisposable? _source;
+    private WaveOut? _device;
+    private BufferedWaveProvider? _buffer;
+    private WaveFormat? _format;
+    private int _playing;
+    private long _generation;
 
     public async Task Play(SpokenAudio audio, CancellationToken cancellationToken)
     {
-        await Stop();
-
-        var (provider, source) = CreateSource(audio);
-        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        WaveOut output;
+        var (source, format) = OpenSource(audio);
         try
         {
-            output = new WaveOut { BufferMilliseconds = BufferMilliseconds, NumberOfBuffers = BufferCount };
-            output.Init(provider);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            source.Dispose();
-            throw new PlaybackDeviceUnavailableException("No playback device is available.", exception);
-        }
-
-        output.PlaybackStopped += (_, args) =>
-        {
-            // A torn-down stream faults the read that was in flight; that is a stop, not a device failure.
-            if (args.Exception is null || cancellationToken.IsCancellationRequested)
+            long mine;
+            BufferedWaveProvider buffer;
+            lock (_gate)
             {
-                finished.TrySetResult();
+                buffer = EnsureDevice(format);
+                mine = _generation;
+                _playing++;
             }
-            else
+
+            try
             {
-                finished.TrySetException(new PlaybackDeviceUnavailableException("Playback failed.", args.Exception));
+                await Pump(source, buffer, mine, cancellationToken);
+                await Drain(buffer, mine, cancellationToken);
             }
-        };
-
-        lock (_gate)
-        {
-            _output = output;
-            _source = source;
-        }
-
-        using var cancellation = cancellationToken.Register(() =>
-        {
-            _ = StopIfCurrent(output);
-
-            // Disposing a WaveOut can swallow the PlaybackStopped that completes this, and nothing
-            // else ever completes it — an abandoned answer would hold its task forever.
-            finished.TrySetResult();
-        });
-        try
-        {
-            output.Play();
-            await finished.Task;
+            finally
+            {
+                Quiesce();
+            }
         }
         finally
         {
-            // Its own device, never simply "whatever is playing". One WaveOut is shared by the
-            // whole app, so an answer that is being abandoned used to tear down the *replacement*
-            // answer on its way out: press the key again mid-sentence and the new reply was cut
-            // off by the old one finishing its finally. Losing the race is the common case, not
-            // the rare one, because stopping the old device is what starts the new request.
-            await StopIfCurrent(output);
+            source.Dispose();
         }
 
         cancellationToken.ThrowIfCancellationRequested();
     }
 
-    /// <summary>Stops whatever is playing, whoever started it.</summary>
-    public Task Stop() => StopIfCurrent(null);
-
-    private Task StopIfCurrent(WaveOut? expected)
+    /// <summary>Idempotent; must not throw. Silences whatever is playing, whoever started it.</summary>
+    public Task Stop()
     {
-        WaveOut? output;
-        IDisposable? source;
         lock (_gate)
         {
-            if (expected is not null && !ReferenceEquals(_output, expected))
+            // Bumping the generation is what tells every in-flight Play that it no longer owns the
+            // device, so their teardown leaves the next answer's audio alone.
+            _generation++;
+            _buffer?.ClearBuffer();
+
+            // ClearBuffer only empties our own provider. The driver is already holding up to
+            // NumberOfBuffers x BufferMilliseconds — 150 ms — of the outgoing answer, and it plays
+            // that out regardless: a short burst of the abandoned answer before the new one starts,
+            // which sounds like the app trying to say something and changing its mind. Disposing
+            // the device used to discard those buffers as a side effect; keeping one device means
+            // asking for it. Stop() calls waveOutReset, and the next EnsureDevice resumes with
+            // Play() on the same device.
+            try
             {
-                return Task.CompletedTask;
+                _device?.Stop();
             }
-
-            output = _output;
-            source = _source;
-            _output = null;
-            _source = null;
-        }
-
-        try
-        {
-            output?.Stop();
-            output?.Dispose();
-            source?.Dispose();
-        }
-        catch (Exception exception)
-        {
-            Log.Debug(exception, "Playback did not stop cleanly");
+            catch (Exception exception)
+            {
+                Log.Debug(exception, "Playback did not flush cleanly");
+            }
         }
 
         return Task.CompletedTask;
     }
 
-    private static (IWaveProvider Provider, IDisposable Source) CreateSource(SpokenAudio audio)
+    public void Dispose()
     {
-        if (audio.PcmSampleRateHz is not int sampleRate)
+        lock (_gate)
         {
-            // Mp3FileReader indexes the whole file up front, so this path cannot stream at all.
-            var buffered = new MemoryStream();
-            using (audio.Audio)
+            _generation++;
+            try
             {
-                audio.Audio.CopyTo(buffered);
+                _device?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                Log.Debug(exception, "Playback device did not close cleanly");
             }
 
-            buffered.Position = 0;
-            var reader = new Mp3FileReader(buffered);
-            return (reader, reader);
+            _device = null;
+            _buffer = null;
+            _format = null;
         }
+    }
 
-        var streamed = new StreamedPcmProvider(audio.Audio, new WaveFormat(sampleRate, 16, 1));
-        return (streamed, streamed);
+    /// <summary>Feeds the device from the response body, stopping early if a newer answer took over.</summary>
+    private async Task Pump(Stream source, BufferedWaveProvider buffer, long mine, CancellationToken cancellationToken)
+    {
+        var chunk = new byte[4096];
+        while (true)
+        {
+            // Reads block until bytes arrive, which is what lets an answer start playing before
+            // synthesis has finished. A zero-length read is the end of this clip.
+            var read = await source.ReadAsync(chunk, cancellationToken);
+            if (read == 0)
+            {
+                return;
+            }
+
+            while (true)
+            {
+                lock (_gate)
+                {
+                    if (_generation != mine)
+                    {
+                        return; // Superseded: the buffer belongs to a newer answer now.
+                    }
+
+                    if (buffer.BufferedDuration < MaxBufferedAhead)
+                    {
+                        buffer.AddSamples(chunk, 0, read);
+                        break;
+                    }
+                }
+
+                await Task.Delay(PollInterval, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>Returns once the speakers have caught up with what was queued.</summary>
+    private async Task Drain(BufferedWaveProvider buffer, long mine, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            lock (_gate)
+            {
+                if (_generation != mine || buffer.BufferedBytes == 0)
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(PollInterval, cancellationToken);
+        }
     }
 
     /// <summary>
-    /// Feeds NAudio straight from the response body. Reads block until bytes arrive, which is what
-    /// lets playback begin before synthesis has finished; a zero-length read is the end of the clip.
+    /// Pauses the device once nothing is playing. The device and its handle are kept — reopening
+    /// them is the cost this class exists to avoid — but a paused device stops consuming buffers,
+    /// so an idle Winly holds no running audio thread (constitution: no measurable CPU at idle).
     /// </summary>
-    private sealed class StreamedPcmProvider(Stream source, WaveFormat format) : IWaveProvider, IDisposable
+    private void Quiesce()
     {
-        public WaveFormat WaveFormat => format;
-
-        public int Read(Span<byte> buffer)
+        lock (_gate)
         {
-            // NAudio zero-pads a short read, which is an audible gap. The response stream blocks
-            // until bytes arrive, so filling the buffer here is what keeps the answer continuous;
-            // only a genuine end of stream returns less than was asked for.
-            var filled = 0;
-            while (filled < buffer.Length)
+            if (--_playing > 0 || _device is null)
             {
-                var read = source.Read(buffer[filled..]);
-                if (read == 0)
-                {
-                    break;
-                }
-
-                filled += read;
+                return;
             }
 
-            return filled;
+            try
+            {
+                _buffer?.ClearBuffer();
+                _device.Pause();
+            }
+            catch (Exception exception)
+            {
+                Log.Debug(exception, "Playback did not pause cleanly");
+            }
+        }
+    }
+
+    /// <summary>Creates the device on first use, or replaces it if the audio format has changed.</summary>
+    private BufferedWaveProvider EnsureDevice(WaveFormat format)
+    {
+        if (_device is not null && _buffer is not null && _format is not null && _format.Equals(format))
+        {
+            _device.Play(); // No-op when already playing; resumes after Quiesce paused it.
+            return _buffer;
         }
 
-        public void Dispose() => source.Dispose();
+        try
+        {
+            _device?.Dispose();
+            var buffer = new BufferedWaveProvider(format)
+            {
+                // Silence rather than a stop when the pump falls behind: an underrun mid-answer
+                // would otherwise end playback and need restarting, which is the gap all over again.
+                ReadFully = true,
+                // Capacity is fixed at NAudio's default 5 s and is not settable in this version.
+                // The pump never queues more than MaxBufferedAhead (2 s), so the ceiling that
+                // actually binds is ours; this flag only keeps a pathological overrun from throwing.
+                DiscardOnBufferOverflow = true,
+            };
+            var device = new WaveOut
+            {
+                BufferMilliseconds = DeviceBufferMilliseconds,
+                NumberOfBuffers = DeviceBufferCount,
+            };
+            device.Init(buffer);
+            device.Play();
+
+            _device = device;
+            _buffer = buffer;
+            _format = format;
+            return buffer;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _device = null;
+            _buffer = null;
+            _format = null;
+            throw new PlaybackDeviceUnavailableException("No playback device is available.", exception);
+        }
+    }
+
+    /// <summary>
+    /// Raw PCM plays straight off the network stream as it arrives; MP3 has to be buffered whole
+    /// first, because <see cref="Mp3FileReader"/> indexes the file up front and cannot stream.
+    /// </summary>
+    private static (Stream Source, WaveFormat Format) OpenSource(SpokenAudio audio)
+    {
+        if (audio.PcmSampleRateHz is int sampleRate)
+        {
+            return (audio.Audio, new WaveFormat(sampleRate, 16, 1));
+        }
+
+        var buffered = new MemoryStream();
+        using (audio.Audio)
+        {
+            audio.Audio.CopyTo(buffered);
+        }
+
+        buffered.Position = 0;
+        var reader = new Mp3FileReader(buffered);
+        return (reader, reader.WaveFormat);
     }
 }
