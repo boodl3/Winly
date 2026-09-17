@@ -183,7 +183,7 @@ The verbs:
 "volume" — target is an app's name, or "spotify" for the music itself, or empty for the whole system. With "relative":true, amount is a step added to the current volume — the only way to express "turn it down", since you cannot read the current level. Use about -20 for a nudge down, +20 for up, -40 for "much quieter". With "relative":false, amount is an absolute 0-100.
 "window" — target is an app's name, argument is focus, minimize, maximize, restore, close, left or right (left and right snap it to that half of the screen).
 "system" — target is lock, sleep, darkmode, lightmode, brightness, mute, unmute, wifi, bluetooth or showdesktop. Only "brightness" carries an amount, absolute or relative like volume.
-"type" — target is the literal text to type into whatever the user is focused on. Use it only when they clearly dictated something to be typed.
+"type" — target is the literal text to type into whatever is focused. It is not only for dictation: when they ask you to write something down — a summary, a note, an email draft — you compose the text yourself and put it in the target. Open or click the destination first, in the same request, so the text has somewhere to land: a document goes in Notepad, an email goes in the compose window of whatever mail they use. Write the real text out in full: never a placeholder, an ellipsis, or a run of repeated characters standing in for words you have not written. Use line breaks where the text should have them, a blank line between paragraphs, so a letter or an email arrives laid out rather than as one block. Keep it under about 1500 characters; if that is not enough room, write a shorter piece that is complete rather than a long one that is not.
 "clipboard" — target is read (say the clipboard aloud) or copy (copy the current selection).
 "openpath" — target is a file or folder name to find under the user's own profile and open.
 "click" — target is the visible label of something on their screen to press: a video on a results page, a link, a button, a row. Argument is the app it is in (Edge, Chrome, Spotify) or empty for whatever they are looking at. Copy the label off the screenshot as exactly as you can read it — that text is matched against the real control, so "Procreate Tutorial for Beginners" finds it and "the first video" does not. This is the only verb that reaches something that is merely on screen; it needs the screenshots, so ask for them with @@NEEDSCREEN@@ if they are not attached.
@@ -211,12 +211,16 @@ Worked examples, spoken request on the left and the designation it deserves on t
 "what's on my clipboard" -> @@DO {"action":"clipboard","target":"read"}@@
 "type out dear Sam, thanks for the update" -> @@DO {"action":"type","target":"Dear Sam, thanks for the update"}@@
 "open my tax folder" -> @@DO {"action":"openpath","target":"tax"}@@
+"write me a summary of this in notepad" -> @@DO {"action":"open","target":"Notepad"}@@ then @@DO {"action":"type","target":"<the summary, written out in full>"}@@
+"draft an email to Sam saying the release slipped" -> @@DO {"action":"open","target":"https://mail.google.com/mail/u/0/?view=cm&fs=1"}@@ then @@DO {"action":"click","target":"Message Body","argument":"Chrome"}@@ then @@DO {"action":"type","target":"<the draft>"}@@ — the compose URL carries nothing but the compose flag
 "play the first Procreate video" -> @@DO {"action":"click","target":"<the first result's title, read off the screenshot>","argument":"Edge"}@@ — a video on a page is a click, never "play"
 "click the accept button" -> @@DO {"action":"click","target":"Accept","argument":""}@@
 "open the second search result" -> @@DO {"action":"click","target":"<that result's title, read off the screenshot>","argument":"Chrome"}@@
 "remind me in twenty minutes to stretch" -> @@DO {"action":"timer","target":"stretch","amount":1200}@@
 "what does this button do" -> no action designation at all, just the pointing one
 "how much is this going to cost me" -> no action designation at all
+
+When your answer asks the user something you need an answer to before you can go on, add @@LISTEN@@ on its own line and Winly will reopen the microphone for them straight away instead of making them press the key again. Only when you genuinely need the reply — asking them to repeat a request you could not make out, or which of two things they meant. Never on a question you are only asking rhetorically, and never on an answer that is complete without one.
 
 What you are given is speech recognition output, so a word is sometimes misheard. If a request is one small sound away from a plain command — "pinch Claude to the left" for "pin Claude to the left" — act on the command it obviously meant. If you genuinely cannot tell what was asked, say you did not catch that and ask them to say it again: never assemble an answer out of unrelated things on the screen to have something to say.
 
@@ -226,7 +230,11 @@ One hold of the key is one utterance, and people put several jobs in it. Write a
 
 Say only what you actually wrote a designation for. If you did not emit an action, do not say the thing is done, opening, playing or "should be up" — say plainly that you cannot do that part, or ask what they meant. Winly tells the user itself when an action fails, so an honest "I'm opening it" is right even if it turns out not to work; a claim with no designation behind it is always wrong.
 
+Two rules about writing into other people's apps. Never put a recipient, a subject or any message text in a URL you open — open the bare compose window and type them into the fields instead. And never press Send, Publish or Post: write the draft, say it is ready, and leave it for the user to send themselves.
+
 Three mistakes to avoid: reaching for "open" with a music URL when the user wants to hear something (that is what "play" is for), giving an absolute volume when the user said louder or quieter (that is what "relative" is for), and using "play" for anything that is not music on Spotify — a video, a file or anything visible on the screen is "click" or "openpath".
+
+Earlier turns of this conversation may be attached above. They are there for a follow-up like "and the one next to it?", which arrives seconds later. Unless the latest request actually refers back to one of them, answer it entirely on its own and do not mention them — a question that has nothing to do with the last one is the common case, not the exception.
 
 If a line saying what is playing is attached below, trust it over the screenshots for questions about the current song, and for aiming playback controls.
 
@@ -290,6 +298,57 @@ function isTimeout(error: unknown): boolean {
  * Exported only so index.test.ts can reach it: this is the sole place designations are parsed,
  * the desktop client trusting whatever comes out of it rather than re-deriving anything.
  */
+/**
+ * JSON.parse, tolerating the one thing a model reliably gets wrong in a designation: a real
+ * line break inside a string. JSON forbids a raw control character there, so a composed email
+ * or note -- the only targets that have line breaks at all -- threw and was discarded silently,
+ * while the strip below still removed the tag. The user heard "writing that up now" and nothing
+ * happened, which is indistinguishable from the model never emitting the designation.
+ *
+ * Escapes control characters that sit inside a string literal and tries once more. Anything
+ * still malformed after that is genuinely malformed.
+ */
+function parseDesignation(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    // Fall through to the repair below.
+  }
+
+  const ESCAPES: Record<string, string> = {
+    [String.fromCharCode(10)]: String.fromCharCode(92) + "n",
+    [String.fromCharCode(13)]: String.fromCharCode(92) + "r",
+    [String.fromCharCode(9)]: String.fromCharCode(92) + "t",
+  };
+  let repaired = "";
+  let inString = false;
+  let escaped = false;
+  for (const character of json) {
+    if (escaped) {
+      repaired += character;
+      escaped = false;
+    } else if (character === String.fromCharCode(92)) {
+      repaired += character;
+      escaped = true;
+    } else if (character === '"') {
+      inString = !inString;
+      repaired += character;
+    } else if (inString && character < " ") {
+      // Anything else below 0x20 is dropped: it is not text the user asked to be typed.
+      repaired += ESCAPES[character] ?? "";
+    } else {
+      repaired += character;
+    }
+  }
+
+  try {
+    return JSON.parse(repaired);
+  } catch {
+    console.log("chat.designation_unparseable");
+    return null;
+  }
+}
+
 export class DesignationSplitter {
   private pending = "";
 
@@ -317,13 +376,14 @@ export class DesignationSplitter {
     actions: DesktopAction[];
     needsScreen: boolean;
     needsWebSearch: boolean;
+    awaitingReply: boolean;
   } {
     let pointingTarget: PointingTarget | null = null;
     const pointMatch = /@@POINT\s*(\{[\s\S]*?\})\s*@@/.exec(this.pending);
     if (pointMatch) {
       try {
-        const parsed = JSON.parse(pointMatch[1]) as Partial<PointingTarget>;
-        if (typeof parsed.monitorId === "string" && Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
+        const parsed = parseDesignation(pointMatch[1]) as Partial<PointingTarget> | null;
+        if (parsed !== null && typeof parsed.monitorId === "string" && Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
           pointingTarget = {
             monitorId: parsed.monitorId,
             x: Math.round(parsed.x as number),
@@ -345,8 +405,8 @@ export class DesignationSplitter {
     let actionMatch: RegExpExecArray | null;
     while ((actionMatch = actionTag.exec(this.pending)) !== null) {
       try {
-        const parsed = JSON.parse(actionMatch[1]) as Partial<DesktopAction>;
-        if (typeof parsed.action === "string" && ACTION_KINDS.includes(parsed.action)) {
+        const parsed = parseDesignation(actionMatch[1]) as Partial<DesktopAction> | null;
+        if (parsed !== null && typeof parsed.action === "string" && ACTION_KINDS.includes(parsed.action)) {
           const relative = parsed.relative === true;
           actions.push({
             action: parsed.action as DesktopActionKind,
@@ -364,16 +424,22 @@ export class DesignationSplitter {
     const needsScreen = /@@NEEDSCREEN@@/.test(this.pending);
     const needsWebSearch = /@@NEEDWEB@@/.test(this.pending);
 
+    // The answer asked the user something and cannot go on without the reply, so the client reopens
+    // the microphone instead of making them press the key again. Marked by the model rather than
+    // guessed from a trailing question mark, which would open the microphone on rhetorical phrasing.
+    const awaitingReply = /@@LISTEN@@/.test(this.pending);
+
     const trailingText = this.pending
       .replace(/@@POINT\s*\{[\s\S]*?\}\s*@@/g, "")
       .replace(/@@NOPOINT@@/g, "")
       .replace(/@@DO\s*\{[\s\S]*?\}\s*@@/g, "")
       .replace(/@@NEEDSCREEN@@/g, "")
       .replace(/@@NEEDWEB@@/g, "")
+      .replace(/@@LISTEN@@/g, "")
       .replace(/@+\s*$/, "")
       .trimEnd();
     this.pending = "";
-    return { trailingText, pointingTarget, actions, needsScreen, needsWebSearch };
+    return { trailingText, pointingTarget, actions, needsScreen, needsWebSearch, awaitingReply };
   }
 }
 
@@ -438,7 +504,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   const maxSearches = Number.parseInt(env.WEB_SEARCH_MAX_USES ?? "2", 10);
   const upstream = client.messages.stream({
     model: env.CHAT_MODEL,
-    max_tokens: 1024,
+    max_tokens: 2048,
     // A 1 hour TTL, not the 5 minute default: a desktop companion is used in bursts spread
     // across a session. Caching is ignored entirely if this block drops below 1024 tokens.
     system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral", ttl: "1h" } }],
@@ -468,7 +534,7 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (payload: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
-      const usage: Record<string, number> = { displays: body.displays.length };
+      const usage: Record<string, number | string> = { displays: body.displays.length };
       const forward = (event: Anthropic.MessageStreamEvent) => {
         if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
           const safe = splitter.push(event.delta.text);
@@ -481,6 +547,11 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
           usage.cacheWrite = event.message.usage.cache_creation_input_tokens ?? 0;
         } else if (event.type === "message_delta") {
           usage.output = event.usage.output_tokens;
+          // "max_tokens" here is the one thing that separates a model writing filler from a
+          // designation cut in half mid-JSON, which parses as no action at all and says nothing.
+          if (event.delta.stop_reason) {
+            usage.stop = event.delta.stop_reason;
+          }
         }
       };
       try {
@@ -493,11 +564,11 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
         // Mid-stream failure: finish with whatever narration arrived rather than leaving the client hanging.
       }
       console.log("chat.usage", JSON.stringify(usage));
-      const { trailingText, pointingTarget, actions, needsScreen, needsWebSearch } = splitter.finish();
+      const { trailingText, pointingTarget, actions, needsScreen, needsWebSearch, awaitingReply } = splitter.finish();
       if (trailingText.length > 0 && !needsScreen && !needsWebSearch) {
         send({ delta: trailingText });
       }
-      send({ done: true, pointingTarget, actions, needsScreen, needsWebSearch });
+      send({ done: true, pointingTarget, actions, needsScreen, needsWebSearch, awaitingReply });
       controller.close();
     },
   });

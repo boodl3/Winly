@@ -19,11 +19,11 @@ internal static partial class NativeDesktopMethods
     public const nint BroadcastWindow = 0xFFFF;      // HWND_BROADCAST
 
     public const uint KeyEventKeyUp = 0x0002;
-    public const uint KeyEventUnicode = 0x0004;
     public const uint InputKeyboard = 1;
 
     public const ushort VirtualKeyControl = 0x11;
     public const ushort VirtualKeyC = 0x43;
+    public const ushort VirtualKeyV = 0x56;
     public const ushort VirtualKeyD = 0x44;
     public const ushort VirtualKeyLeftWindows = 0x5B;
 
@@ -62,14 +62,23 @@ internal static partial class NativeDesktopMethods
         public nuint ExtraInfo;
     }
 
-    /// <summary>The INPUT union, keyboard arm only — mouse and hardware arms are unused and padded.</summary>
+    /// <summary>
+    /// The INPUT union, keyboard arm only — the mouse and hardware arms are unused and padded out.
+    ///
+    /// The filler is load-bearing and there is exactly one right amount of it. SendInput refuses a
+    /// cbSize that is not precisely sizeof(INPUT): it returns 0, sets ERROR_INVALID_PARAMETER and
+    /// delivers nothing. Native INPUT is 40 bytes on x64 — a DWORD type, 4 bytes of padding, and a
+    /// 32-byte union sized by its largest arm, MOUSEINPUT. KEYBDINPUT is 24 of those 32, so one
+    /// ulong of filler is needed and two is as broken as none. There were two, and `type`,
+    /// `clipboard copy` and the `system` Win+key chords had therefore never worked once.
+    /// `NativeInteropLayoutTests` is what stops that happening again silently.
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     public struct SyntheticInput
     {
         public uint Type;
         public KeyboardInput Keyboard;
-        private readonly ulong _mousePadding0;
-        private readonly ulong _mousePadding1;
+        private readonly ulong _unionFiller;
     }
 
     [LibraryImport("user32.dll")]
@@ -152,7 +161,10 @@ internal static partial class NativeDesktopMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
 
-    [LibraryImport("user32.dll")]
+    // SetLastError, because a returned 0 is the only signal and it has no detail of its own: the
+    // cbSize bug above showed up as "something blocked me from typing" for as long as it existed,
+    // when the error code said ERROR_INVALID_PARAMETER and named itself.
+    [LibraryImport("user32.dll", SetLastError = true)]
     public static partial uint SendInput(uint count, [In] SyntheticInput[] inputs, int size);
 
     [LibraryImport("user32.dll")]
@@ -176,6 +188,22 @@ internal static partial class NativeDesktopMethods
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool GlobalUnlock(nint handle);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool EmptyClipboard();
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    public static partial nint SetClipboardData(uint format, nint handle);
+
+    /// <summary>GMEM_MOVEABLE. Clipboard data has to be moveable memory; the system takes it over.</summary>
+    public const uint GlobalMoveable = 0x0002;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    public static partial nint GlobalAlloc(uint flags, nuint bytes);
+
+    [LibraryImport("kernel32.dll")]
+    public static partial nint GlobalFree(nint handle);
 
     [LibraryImport("powrprof.dll", EntryPoint = "SetSuspendState")]
     [return: MarshalAs(UnmanagedType.Bool)]

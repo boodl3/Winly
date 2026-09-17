@@ -29,6 +29,23 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan TranscriptionGrace = TimeSpan.FromSeconds(8);
 
+    /// <summary>
+    /// How long the microphone stays open after Winly has asked the user something, when nothing is
+    /// said at all. Longer than a confirmation window because the answer here is a sentence rather
+    /// than one word, and someone who has just been asked to repeat themselves takes a moment.
+    /// </summary>
+    private static readonly TimeSpan DefaultReplyWindow = TimeSpan.FromSeconds(8);
+
+    /// <summary>
+    /// How much quiet after the user has clearly started speaking ends the reply. Push-to-talk has
+    /// a key release to say "I am done" and this path has nothing, so the silence has to say it —
+    /// the transcriber will not, since its own turn detection is deliberately pushed to never.
+    /// </summary>
+    private static readonly TimeSpan DefaultQuietEndsAReply = TimeSpan.FromMilliseconds(1200);
+
+    /// <summary>How often the reply window checks whether the user has stopped talking.</summary>
+    private static readonly TimeSpan ReplyPollInterval = TimeSpan.FromMilliseconds(200);
+
     private readonly IActivationKeyMonitor _activationKeys;
     private readonly IMicrophoneCapture _microphone;
     private readonly IDisplayCapture _displays;
@@ -109,6 +126,15 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
     /// does not have to spend five real seconds per confirmation.
     /// </summary>
     internal TimeSpan ConfirmationWindow { get; init; } = SpokenConfirmation.Window;
+
+    /// <summary>
+    /// How long the microphone stays open after Winly has asked a question. Settable for the same
+    /// reason <see cref="ConfirmationWindow"/> is: a test must not spend the real window per case.
+    /// </summary>
+    internal TimeSpan ReplyWindow { get; init; } = DefaultReplyWindow;
+
+    /// <summary>How much quiet ends a reply, once the user has clearly started speaking.</summary>
+    internal TimeSpan QuietEndsAReply { get; init; } = DefaultQuietEndsAReply;
 
     public event Action<string>? TranscriptRecognized;
 
@@ -295,149 +321,34 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
                 return;
             }
 
-            if (!Settings.ScreenCaptureEnabled)
+            // One hold can be more than one turn now: an answer that asks a question reopens the
+            // microphone rather than making the user press the key again.
+            var turnTranscript = transcript;
+            for (var turn = 0; ; turn++)
             {
-                Post("Screen capture is turned off in settings, so I answered without looking at your screen.");
-            }
+                // ponytail: the follow-up turn reuses this hold's screenshots rather than capturing
+                // again — a reply lands seconds later and answers a question about what is already
+                // there. Re-capture per turn if that ever stops being true.
+                var awaitingReply = await RunTurn(activation, turnTranscript, capturing, nowPlaying, releasedAt, transcriptAt, cancellationToken);
 
-            var accumulator = new SentenceAccumulator();
-            var speechQueue = Channel.CreateUnbounded<Task<SpokenAudio>>();
-            var queuedAnySpeech = false;
-            long firstDeltaAt = 0;
-
-            // Everything already handed to synthesis, so each chunk knows what the voice just said
-            // and carries its delivery across the seam instead of opening a fresh announcement.
-            // Only ever touched from the SSE loop's own thread, so a plain local is enough.
-            var spokenSoFar = new StringBuilder();
-
-            void QueueSpeech(string sentence)
-            {
-                var spoken = AnswerTextSanitizer.Sanitize(sentence);
-                if (spoken.Length == 0)
+                // ponytail: one reply per hold. A longer exchange is what pressing the key is for,
+                // and a loop with no floor is a microphone that reopens itself indefinitely.
+                if (!awaitingReply || turn >= 1 || !Settings.MicrophoneCaptureEnabled)
                 {
-                    return;
+                    break;
                 }
 
-                queuedAnySpeech = true;
-                var previous = spokenSoFar.Length == 0 ? null : spokenSoFar.ToString();
-                spokenSoFar.Append(spoken).Append(' ');
-                speechQueue.Writer.TryWrite(_textToSpeech.Synthesize(spoken, previous, cancellationToken));
-            }
-
-            // Synthesis of later sentences overlaps playback of earlier ones, so the answer
-            // starts being spoken before the model has finished writing it (SC-001).
-            var playbackStarted = false;
-            var speaking = Task.Run(
-                async () =>
+                var reply = await ListenForReply(activation, cancellationToken);
+                if (reply.Text.Length == 0)
                 {
-                    await foreach (var synthesis in speechQueue.Reader.ReadAllAsync(cancellationToken))
-                    {
-                        var spokenAudio = await synthesis;
-                        if (!playbackStarted)
-                        {
-                            playbackStarted = true;
-                            Transition(activation, CompanionState.Speaking);
-                            // Split by stage, not just the total: three providers sit between the key
-                            // and the first word, and without the split "make it faster" is a guess
-                            // about which one to go at. -1 means the answer never streamed a delta.
-                            _log.Information(
-                                "activation.latency {ElapsedMilliseconds} ms from key release to playback start (transcript {TranscriptMs} ms, first token {FirstTokenMs} ms, speech {SpeechMs} ms)",
-                                Stopwatch.GetElapsedTime(releasedAt).TotalMilliseconds,
-                                Stopwatch.GetElapsedTime(releasedAt, transcriptAt).TotalMilliseconds,
-                                firstDeltaAt == 0 ? -1 : Stopwatch.GetElapsedTime(transcriptAt, firstDeltaAt).TotalMilliseconds,
-                                firstDeltaAt == 0 ? -1 : Stopwatch.GetElapsedTime(firstDeltaAt).TotalMilliseconds);
-                        }
-
-                        await _playback.Play(spokenAudio, cancellationToken);
-                    }
-                },
-                cancellationToken);
-            _answerSpeech = speaking;
-
-            void OnDelta(string delta)
-            {
-                if (firstDeltaAt == 0)
-                {
-                    firstDeltaAt = Stopwatch.GetTimestamp();
+                    _log.Information("Nothing came back after the question, so the turn ends here");
+                    break;
                 }
 
-                AnswerDeltaReceived?.Invoke(delta);
-                foreach (var sentence in accumulator.Append(delta))
-                {
-                    QueueSpeech(sentence);
-                }
+                TranscriptRecognized?.Invoke(reply.Text);
+                (turnTranscript, releasedAt, transcriptAt) = (reply.Text, reply.ReleasedAt, reply.TranscriptAt);
             }
 
-            ChatAnswer answer;
-            IReadOnlyList<DisplayCapture> displays;
-            try
-            {
-                (answer, displays) = await Ask(transcript, capturing, await nowPlaying, OnDelta, cancellationToken);
-
-                var trailingText = accumulator.Flush();
-                if (trailingText.Length > 0)
-                {
-                    QueueSpeech(trailingText);
-                }
-
-                if (!queuedAnySpeech)
-                {
-                    // A provider that returned the answer without streaming any delta: speak it whole.
-                    QueueSpeech(SpokenNarration(answer));
-                }
-
-                if (!queuedAnySpeech)
-                {
-                    QueueSpeech(NoAnswerText);
-                }
-            }
-            finally
-            {
-                speechQueue.Writer.TryComplete();
-            }
-
-            var (narration, target) = PointingDesignationParser.Parse(answer.Text, answer.PointingTarget);
-            var (actionFreeNarration, actions) = DesktopActionParser.Parse(narration, answer.Actions);
-            var spokenText = AnswerTextSanitizer.Sanitize(actionFreeNarration);
-            if (spokenText.Length == 0)
-            {
-                spokenText = NoAnswerText;
-            }
-
-            var targetCapture = target is null ? null : displays.FirstOrDefault(display => display.MonitorId == target.MonitorId);
-            if (target is not null && targetCapture is not null)
-            {
-                _ = _overlay.PointTo(CaptureToDesktopCoordinateMapper.Map(target, targetCapture), cancellationToken);
-            }
-            else
-            {
-                _overlay.ReturnToRest();
-            }
-
-            // Started before the answer finishes playing, so the app is opening as Winly says so.
-            var sequence = await RunDesktopActions(actions, cancellationToken);
-
-            await speaking;
-            foreach (var outcome in sequence.Outcomes)
-            {
-                if (!string.IsNullOrWhiteSpace(outcome.FollowUpSpeech))
-                {
-                    await Announce(outcome.FollowUpSpeech, cancellationToken);
-                }
-            }
-
-            // Spoken, not just posted to the panel. The answer has already said "playing it" or
-            // "opening it" out loud, so an action that then failed leaves the user with a claim and
-            // no way to hear it retracted — the panel is not open, and this is the whole reason
-            // "it says it is playing the video but it does not" looked like a lie rather than a
-            // failure. Fail loud (Principle VII): whatever contradicts the answer is said aloud too.
-            var unfinished = FailureMessages.ForSequence(sequence);
-            if (unfinished.Length > 0)
-            {
-                await Announce(unfinished, cancellationToken);
-            }
-
-            Session.Append(new Exchange(transcript, spokenText, targetCapture is null ? null : target, DateTimeOffset.UtcNow));
             Finish(activation);
         }
         catch (Exception failure) when (cancellationToken.IsCancellationRequested)
@@ -457,6 +368,261 @@ public sealed class CompanionOrchestrator : IAsyncDisposable
             Post(FailureMessages.For(failure));
             Finish(activation);
         }
+    }
+
+    /// <summary>
+    /// Reopens the microphone after Winly has asked the user a question, and returns what they said.
+    ///
+    /// Nothing heard is an empty string, which ends the exchange rather than asking again. The
+    /// question is spoken to completion first, for the same reason a confirmation is: Winly's own
+    /// voice is coming out of the speakers, and capturing over it transcribes the question as its
+    /// own answer. And the window bounds the *capture*, never the transcription — a transcriber
+    /// does not finalize a turn until the audio stream ends, so cancelling it throws the answer away
+    /// instead of reading it.
+    /// </summary>
+    private async Task<(string Text, long ReleasedAt, long TranscriptAt)> ListenForReply(
+        CancellationTokenSource activation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _answerSpeech;
+        }
+        catch (Exception failure)
+        {
+            _log.Debug(failure, "The answer being spoken ended badly; listening anyway");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        using var listening = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        listening.CancelAfter(ReplyWindow + TranscriptionGrace);
+        try
+        {
+            // A real transition, unlike a confirmation's: this is the top of a second turn, and the
+            // machine has to leave Speaking or the next turn's Speaking transition is illegal and
+            // takes the whole activation down with "Activation failed". Speaking -> Listening ->
+            // Working is legal from either state turn one can end in.
+            Transition(activation, CompanionState.Listening);
+            await _microphone.StopCapture();
+            var audio = await _microphone.StartCapture(listening.Token);
+
+            var lastPartialAt = Stopwatch.GetTimestamp();
+            var heardSomething = false;
+            var transcribing = _speechToText.Transcribe(
+                audio,
+                listening.Token,
+                partial =>
+                {
+                    if (partial.Trim().Length == 0)
+                    {
+                        return;
+                    }
+
+                    heardSomething = true;
+                    lastPartialAt = Stopwatch.GetTimestamp();
+                });
+
+            // ponytail: a 200 ms poll over the partials rather than real voice activity detection.
+            // It only has to tell "still talking" from "finished", and the alternative is a second
+            // turn detector that would then disagree with the transcriber's own.
+            var deadline = Stopwatch.GetTimestamp();
+            while (Stopwatch.GetElapsedTime(deadline) < ReplyWindow)
+            {
+                await Task.Delay(ReplyPollInterval, listening.Token);
+                if (heardSomething && Stopwatch.GetElapsedTime(lastPartialAt) > QuietEndsAReply)
+                {
+                    break;
+                }
+            }
+
+            var releasedAt = Stopwatch.GetTimestamp();
+            await _microphone.StopCapture();
+            var text = (await transcribing).Trim();
+            _log.Information("Reply heard after the question: {Heard}", text.Length == 0 ? "nothing" : text);
+            return (text, releasedAt, Stopwatch.GetTimestamp());
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _log.Information(failure, "Nothing usable was heard after the question");
+            return (string.Empty, 0, 0);
+        }
+        finally
+        {
+            await _microphone.StopCapture();
+            try
+            {
+                if (StateMachine.State == CompanionState.Listening)
+                {
+                    Transition(activation, CompanionState.Working);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Superseded while the microphone was open; the newer activation owns the state.
+            }
+        }
+    }
+
+    /// <summary>
+    /// One question and its answer: ask, speak, point, act, remember. Returns whether the answer
+    /// asked the user something it needs a reply to before it can go on.
+    /// </summary>
+    private async Task<bool> RunTurn(
+        CancellationTokenSource activation,
+        string transcript,
+        Task<IReadOnlyList<DisplayCapture>> capturing,
+        Task<NowPlaying?> nowPlaying,
+        long releasedAt,
+        long transcriptAt,
+        CancellationToken cancellationToken)
+    {
+        if (!Settings.ScreenCaptureEnabled)
+        {
+            Post("Screen capture is turned off in settings, so I answered without looking at your screen.");
+        }
+
+        var accumulator = new SentenceAccumulator();
+        var speechQueue = Channel.CreateUnbounded<Task<SpokenAudio>>();
+        var queuedAnySpeech = false;
+        long firstDeltaAt = 0;
+
+        // Everything already handed to synthesis, so each chunk knows what the voice just said
+        // and carries its delivery across the seam instead of opening a fresh announcement.
+        // Only ever touched from the SSE loop's own thread, so a plain local is enough.
+        var spokenSoFar = new StringBuilder();
+
+        void QueueSpeech(string sentence)
+        {
+            var spoken = AnswerTextSanitizer.Sanitize(sentence);
+            if (spoken.Length == 0)
+            {
+                return;
+            }
+
+            queuedAnySpeech = true;
+            var previous = spokenSoFar.Length == 0 ? null : spokenSoFar.ToString();
+            spokenSoFar.Append(spoken).Append(' ');
+            speechQueue.Writer.TryWrite(_textToSpeech.Synthesize(spoken, previous, cancellationToken));
+        }
+
+        // Synthesis of later sentences overlaps playback of earlier ones, so the answer
+        // starts being spoken before the model has finished writing it (SC-001).
+        var playbackStarted = false;
+        var speaking = Task.Run(
+            async () =>
+            {
+                await foreach (var synthesis in speechQueue.Reader.ReadAllAsync(cancellationToken))
+                {
+                    var spokenAudio = await synthesis;
+                    if (!playbackStarted)
+                    {
+                        playbackStarted = true;
+                        Transition(activation, CompanionState.Speaking);
+                        // Split by stage, not just the total: three providers sit between the key
+                        // and the first word, and without the split "make it faster" is a guess
+                        // about which one to go at. -1 means the answer never streamed a delta.
+                        _log.Information(
+                            "activation.latency {ElapsedMilliseconds} ms from key release to playback start (transcript {TranscriptMs} ms, first token {FirstTokenMs} ms, speech {SpeechMs} ms)",
+                            Stopwatch.GetElapsedTime(releasedAt).TotalMilliseconds,
+                            Stopwatch.GetElapsedTime(releasedAt, transcriptAt).TotalMilliseconds,
+                            firstDeltaAt == 0 ? -1 : Stopwatch.GetElapsedTime(transcriptAt, firstDeltaAt).TotalMilliseconds,
+                            firstDeltaAt == 0 ? -1 : Stopwatch.GetElapsedTime(firstDeltaAt).TotalMilliseconds);
+                    }
+
+                    await _playback.Play(spokenAudio, cancellationToken);
+                }
+            },
+            cancellationToken);
+        _answerSpeech = speaking;
+
+        void OnDelta(string delta)
+        {
+            if (firstDeltaAt == 0)
+            {
+                firstDeltaAt = Stopwatch.GetTimestamp();
+            }
+
+            AnswerDeltaReceived?.Invoke(delta);
+            foreach (var sentence in accumulator.Append(delta))
+            {
+                QueueSpeech(sentence);
+            }
+        }
+
+        ChatAnswer answer;
+        IReadOnlyList<DisplayCapture> displays;
+        try
+        {
+            (answer, displays) = await Ask(transcript, capturing, await nowPlaying, OnDelta, cancellationToken);
+
+            var trailingText = accumulator.Flush();
+            if (trailingText.Length > 0)
+            {
+                QueueSpeech(trailingText);
+            }
+
+            if (!queuedAnySpeech)
+            {
+                // A provider that returned the answer without streaming any delta: speak it whole.
+                QueueSpeech(SpokenNarration(answer));
+            }
+
+            if (!queuedAnySpeech)
+            {
+                QueueSpeech(NoAnswerText);
+            }
+        }
+        finally
+        {
+            speechQueue.Writer.TryComplete();
+        }
+
+        var (narration, target) = PointingDesignationParser.Parse(answer.Text, answer.PointingTarget);
+        var (actionFreeNarration, actions) = DesktopActionParser.Parse(narration, answer.Actions);
+        var spokenText = AnswerTextSanitizer.Sanitize(actionFreeNarration);
+        if (spokenText.Length == 0)
+        {
+            spokenText = NoAnswerText;
+        }
+
+        var targetCapture = target is null ? null : displays.FirstOrDefault(display => display.MonitorId == target.MonitorId);
+        if (target is not null && targetCapture is not null)
+        {
+            _ = _overlay.PointTo(CaptureToDesktopCoordinateMapper.Map(target, targetCapture), cancellationToken);
+        }
+        else
+        {
+            _overlay.ReturnToRest();
+        }
+
+        // Started before the answer finishes playing, so the app is opening as Winly says so.
+        var sequence = await RunDesktopActions(actions, cancellationToken);
+
+        await speaking;
+        foreach (var outcome in sequence.Outcomes)
+        {
+            if (!string.IsNullOrWhiteSpace(outcome.FollowUpSpeech))
+            {
+                await Announce(outcome.FollowUpSpeech, cancellationToken);
+            }
+        }
+
+        // Spoken, not just posted to the panel. The answer has already said "playing it" or
+        // "opening it" out loud, so an action that then failed leaves the user with a claim and
+        // no way to hear it retracted — the panel is not open, and this is the whole reason
+        // "it says it is playing the video but it does not" looked like a lie rather than a
+        // failure. Fail loud (Principle VII): whatever contradicts the answer is said aloud too.
+        var unfinished = FailureMessages.ForSequence(sequence);
+        if (unfinished.Length > 0)
+        {
+            await Announce(unfinished, cancellationToken);
+        }
+
+        // Same rule as a failed action: the answer has already said it is writing that down, so an
+        // answer too broken to type is a claim the user has heard and nothing to contradict it.
+        Session.Append(new Exchange(transcript, spokenText, targetCapture is null ? null : target, DateTimeOffset.UtcNow));
+        return answer.AwaitingReply;
     }
 
     /// <summary>

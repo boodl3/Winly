@@ -82,6 +82,11 @@ public sealed class DesktopActionSequenceRunner(
 
         var outcomes = new List<ActionOutcome>(planned.Count);
         var launchedInThisSequence = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // The app this same request launched, for the verbs that name no app of their own: "open
+        // Notepad and write me a summary" has to wait for Notepad's window before it types, and
+        // "type" carries nothing that says so.
+        var lastLaunched = string.Empty;
         var stopped = false;
 
         foreach (var action in planned)
@@ -104,7 +109,7 @@ public sealed class DesktopActionSequenceRunner(
                 continue;
             }
 
-            var outcome = await RunOne(action, launchedInThisSequence, cancellationToken);
+            var outcome = await RunOne(action, launchedInThisSequence, lastLaunched, cancellationToken);
             outcomes.Add(outcome);
 
             if (outcome.StopsSequence)
@@ -116,6 +121,7 @@ public sealed class DesktopActionSequenceRunner(
             if (action.Kind == DesktopActionKind.Open && !LooksLikeUrl(action.Target))
             {
                 launchedInThisSequence.Add(action.Target);
+                lastLaunched = action.Target;
             }
         }
 
@@ -125,9 +131,10 @@ public sealed class DesktopActionSequenceRunner(
     private async Task<ActionOutcome> RunOne(
         DesktopAction action,
         HashSet<string> launchedInThisSequence,
+        string lastLaunched,
         CancellationToken cancellationToken)
     {
-        var dependency = ApplicationThisActionNeeds(action);
+        var dependency = ApplicationThisActionNeeds(action, lastLaunched);
         if (dependency.Length > 0 && launchedInThisSequence.Contains(dependency))
         {
             var ready = await desktopActions.WaitForApplicationReady(dependency, bounds.ApplicationReady, cancellationToken);
@@ -186,14 +193,19 @@ public sealed class DesktopActionSequenceRunner(
     /// decide whether to wait for something this same request launched — an app that was already
     /// running needs no wait.
     /// </summary>
-    private static string ApplicationThisActionNeeds(DesktopAction action) => action.Kind switch
+    private static string ApplicationThisActionNeeds(DesktopAction action, string lastLaunched) => action.Kind switch
     {
         DesktopActionKind.Window or DesktopActionKind.Volume => action.Target,
-        // A click names its app in the argument, and may name no app at all.
-        DesktopActionKind.Click => action.Argument,
+        // A click names its app in the argument, and may name no app at all — in which case it
+        // means whatever this request just opened, if anything.
+        DesktopActionKind.Click => action.Argument.Length > 0 ? action.Argument : lastLaunched,
+        // Typing names no app at all, so it means the one this request just opened. Without this,
+        // "open Notepad and write me a summary" typed before Notepad had a window.
+        DesktopActionKind.Type => lastLaunched,
         DesktopActionKind.Play or DesktopActionKind.Queue or DesktopActionKind.Media => SpotifyAppName,
         _ => string.Empty,
     };
+
 
     /// <summary>A URL opens in the browser and launches no app worth waiting for by name.</summary>
     private static bool LooksLikeUrl(string target) =>

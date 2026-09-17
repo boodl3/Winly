@@ -15,6 +15,35 @@ function split(answer: string) {
 }
 
 const open = '@@DO {"action":"open","target":"Spotify"}@@';
+
+describe("a composed body with real line breaks in it", () => {
+  // A model asked to write an email puts the line breaks in, and sometimes writes them as
+  // actual newlines rather than \n escapes. JSON forbids a raw control character inside a
+  // string, so JSON.parse threw and the designation was dropped -- while the strip regex
+  // ([\s\S] crosses newlines) still removed the tag, so the user heard "writing that up now"
+  // and got nothing. Silent, and indistinguishable from the model never emitting it.
+  const raw =
+    '@@DO {"action":"type","target":"Dear Sam,' + String.fromCharCode(10) + String.fromCharCode(10) +
+    'The release slipped.' + String.fromCharCode(10) + String.fromCharCode(10) + 'Best"}@@';
+
+  it("still yields the action", () => {
+    const result = split("Writing that up now. @@NOPOINT@@ " + raw);
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0].action).toBe("type");
+  });
+
+  it("keeps the line breaks it was given", () => {
+    const target = split("Writing that up now. @@NOPOINT@@ " + raw).actions[0].target;
+    expect(target.split(String.fromCharCode(10)).length).toBe(5);
+    expect(target.startsWith("Dear Sam,")).toBe(true);
+    expect(target.endsWith("Best")).toBe(true);
+  });
+
+  it("does not leak the tag into the spoken answer", () => {
+    expect(split("Writing that up now. @@NOPOINT@@ " + raw).spoken).toBe("Writing that up now.");
+  });
+});
+
 const play = '@@DO {"action":"play","target":"jazz"}@@';
 
 describe("DesignationSplitter", () => {
@@ -82,6 +111,27 @@ function ask(token: string | undefined, header?: string) {
     { WINLY_CLIENT_TOKEN: token } as unknown as Env,
   );
 }
+
+describe("@@LISTEN@@", () => {
+  it("marks the answer as awaiting a reply and never speaks the tag", () => {
+    const { awaitingReply, spoken } = split("I didn't catch that. Could you say it again? @@LISTEN@@ @@NOPOINT@@");
+
+    expect(awaitingReply).toBe(true);
+    expect(spoken).toBe("I didn't catch that. Could you say it again?");
+  });
+
+  it("is absent from an ordinary answer, so the microphone stays shut", () => {
+    expect(split("It's the settings panel. @@NOPOINT@@").awaitingReply).toBe(false);
+  });
+
+  it("survives arriving alongside an action, which is parsed last", () => {
+    const { awaitingReply, actions, spoken } = split(`Opening it. ${open} @@LISTEN@@`);
+
+    expect(awaitingReply).toBe(true);
+    expect(actions.map((one) => one.action)).toEqual(["open"]);
+    expect(spoken).toBe("Opening it.");
+  });
+});
 
 describe("isAuthorized", () => {
   it("accepts the configured token", () => {

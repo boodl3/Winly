@@ -35,7 +35,15 @@ internal static class ScreenClickControl
     /// </summary>
     private const int MaxCandidates = 3000;
 
-    /// <summary>Control types worth pressing. Everything else is layout, text or chrome.</summary>
+    /// <summary>
+    /// Control types worth pressing. Everything else is layout, text or chrome.
+    ///
+    /// Edit, Document and ComboBox are here because a text field is a thing people ask to be
+    /// clicked: "click the subject line" means put the caret in it. Without them an email could be
+    /// composed and never filled in — Gmail's Compose is a Button and was found, while To and
+    /// Subject are Edits and the body is a Document, so none of the three was ever a candidate and
+    /// the failure read as "I couldn't find Subject on your screen".
+    /// </summary>
     private static readonly Condition Clickable = new AndCondition(
         new PropertyCondition(AutomationElement.IsEnabledProperty, true),
         new OrCondition(
@@ -47,7 +55,10 @@ internal static class ScreenClickControl
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TreeItem),
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.CheckBox),
             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton),
-            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image)));
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ComboBox)));
 
     /// <param name="appName">The app to look in, or empty to use <paramref name="fallbackWindow"/>.</param>
     /// <param name="fallbackWindow">
@@ -142,6 +153,13 @@ internal static class ScreenClickControl
             {
                 // List rows and tabs are selected rather than invoked.
                 ((SelectionItemPattern)select).Select();
+            }
+            else if (candidates[chosen].Current.IsKeyboardFocusable)
+            {
+                // A text field offers neither pattern, and clicking one means putting the caret in
+                // it — which is exactly SetFocus. Without this arm the field types above would be
+                // found and then reported as offering no way to be pressed.
+                candidates[chosen].SetFocus();
             }
             else
             {

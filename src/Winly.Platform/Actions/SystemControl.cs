@@ -157,7 +157,7 @@ internal static class SystemControl
             Key(virtualKey, up: true),
             Key(VirtualKeyLeftWindows, up: true),
         ];
-        SendInput((uint)sequence.Length, sequence, System.Runtime.InteropServices.Marshal.SizeOf<SyntheticInput>());
+        UserInputControl.Send(sequence, "pressing that");
     }
 
     internal static SyntheticInput Key(ushort virtualKey, bool up) => new()

@@ -221,7 +221,7 @@ public class DesktopActionSequenceRunnerTests
             return Task.FromResult(true);
         });
 
-        await runner.Run([CloseWord(), new DesktopAction(DesktopActionKind.Type, "hello")], CancellationToken.None);
+        await runner.Run([CloseWord(), new DesktopAction(DesktopActionKind.System, "lock")], CancellationToken.None);
 
         Assert.Equal(2, asked.Count);
     }
@@ -322,4 +322,46 @@ public class DesktopActionSequenceRunnerTests
         Assert.Equal(1, _reminders.PendingCount);
         Assert.True(result.EverythingCompleted);
     }
+
+    [Fact]
+    public async Task TypingWaitsForTheApplicationThisRequestJustOpened()
+    {
+        var result = await Runner().Run(
+            [Open("Notepad"), new DesktopAction(DesktopActionKind.Type, "the summary")],
+            CancellationToken.None);
+
+        await _actions.Received(1).WaitForApplicationReady("Notepad", Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>());
+        Assert.True(result.EverythingCompleted);
+    }
+
+    /// <summary>
+    /// Typing is never confirmed now, wherever it is aimed — into an app this request opened, into a
+    /// field it clicked, or into whatever the user already had in front of them. The guard that
+    /// replaced the question lives in UserInputControl, which refuses if the focus has moved.
+    /// </summary>
+    [Fact]
+    public async Task TypingIsCarriedOutWithoutBeingAskedAbout()
+    {
+        var asked = new List<DesktopAction>();
+
+        var result = await Runner(confirm: (action, _) =>
+        {
+            asked.Add(action);
+            return Task.FromResult(true);
+        }).Run(
+            [
+                new DesktopAction(DesktopActionKind.Type, "dear Sam"),
+                Open("Notepad"),
+                new DesktopAction(DesktopActionKind.Type, "the summary"),
+                Open("https://mail.google.com/mail/u/0/?view=cm&fs=1"),
+                new DesktopAction(DesktopActionKind.Click, "Message Body", "Chrome"),
+                new DesktopAction(DesktopActionKind.Type, "the draft"),
+            ],
+            CancellationToken.None);
+
+        Assert.Empty(asked);
+        Assert.True(result.EverythingCompleted);
+        Assert.Equal(6, _ran.Count);
+    }
+
 }

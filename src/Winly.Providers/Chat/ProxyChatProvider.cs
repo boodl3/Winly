@@ -49,6 +49,7 @@ public sealed class ProxyChatProvider(HttpClient httpClient, ProxyEndpointOption
         IReadOnlyList<DesktopAction> actions = [];
         var needsScreen = false;
         var needsWeb = false;
+        var awaitingReply = false;
         await foreach (var data in ServerSentEventReader.ReadDataEvents(serverSentEvents, cancellationToken))
         {
             using var document = JsonDocument.Parse(data);
@@ -91,8 +92,9 @@ public sealed class ProxyChatProvider(HttpClient httpClient, ProxyEndpointOption
 
             needsScreen = root.TryGetProperty("needsScreen", out var asked) && asked.ValueKind == JsonValueKind.True;
             needsWeb = root.TryGetProperty("needsWebSearch", out var wanted) && wanted.ValueKind == JsonValueKind.True;
+            awaitingReply = root.TryGetProperty("awaitingReply", out var listening) && listening.ValueKind == JsonValueKind.True;
         }
 
-        return new ChatAnswer(text.ToString(), target, actions, needsScreen, needsWeb);
+        return new ChatAnswer(text.ToString(), target, actions, needsScreen, needsWeb, awaitingReply);
     }
 }

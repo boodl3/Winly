@@ -58,7 +58,7 @@ internal static class WindowControl
     /// So the result is checked rather than assumed, and on a refusal the two input queues are
     /// joined for the length of one call, which is the documented way to ask on equal terms.
     /// </summary>
-    private static void Focus(nint window)
+    internal static void Focus(nint window)
     {
         if (IsIconic(window))
         {

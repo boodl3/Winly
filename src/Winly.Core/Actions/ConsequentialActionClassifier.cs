@@ -12,8 +12,12 @@ public static class ConsequentialActionClassifier
 {
     public static bool IsConsequential(DesktopAction action) => action.Kind switch
     {
-        // Types into whatever holds focus, which is never fully knowable in advance.
-        DesktopActionKind.Type => true,
+        // Typing is the one consequential-looking verb that is not: text can be undone, and the
+        // guard that matters is UserInputControl's focus check, which refuses outright if anything
+        // but the intended window is in front when the keystrokes go out. Confirming every one made
+        // dictation and writing a document a two-step conversation each time, which is the whole
+        // point of the verb gone. Asked for explicitly; closing, locking and sleeping still confirm.
+        DesktopActionKind.Type => false,
 
         // Closing may discard unsaved work; every other window verb is reversible.
         DesktopActionKind.Window => action.Argument.Equals("close", StringComparison.OrdinalIgnoreCase),

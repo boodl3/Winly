@@ -36,13 +36,15 @@ changes, plus the system prompt instruction that produces it.
     { "action": "play", "target": "jazz" }
   ],
   "needsScreen": false,
-  "needsWebSearch": false
+  "needsWebSearch": false,
+  "awaitingReply": false
 }
 ```
 
 | Field | Type | Notes |
 |---|---|---|
 | `actions` | `DesktopAction[]` | **Authoritative and sole.** Ordered as the model declared them. Always present; `[]` when there are none. Not capped — see §2. |
+| `awaitingReply` | `boolean` | The answer asked the user something it needs an answer to. Produced by an `@@LISTEN@@` designation, which is stripped from the spoken text like every other. The client reopens the microphone for one reply rather than making the user press the activation key again; it is a hint, and a client that ignores it simply behaves as before. |
 
 `pointingTarget`, `needsScreen` and `needsWebSearch` are unchanged. The shape of an
 individual `DesktopAction` object is unchanged — same eleven verbs, same fields, same

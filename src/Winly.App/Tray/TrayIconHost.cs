@@ -9,11 +9,23 @@ namespace Winly.App.Tray;
 /// <summary>The tray entry — the app's only persistent chrome (FR-001). Icons are drawn here, not shipped as assets.</summary>
 public sealed class TrayIconHost : IDisposable
 {
+    // H.NotifyIcon's TaskbarIcon.Id defaults to an all-zero Guid, and Windows keys an icon's shell
+    // registration off (exe path, Id) - so two TaskbarIcons from this same exe with unset Id are the
+    // *same* registration. ShowAlreadyRunningNotification used to construct one of those on every
+    // failed second launch, and its Dispose() (NIM_DELETE) then deleted the live instance's icon out
+    // from under it a few seconds later. Two distinct fixed GUIDs keep the two icons apart.
+    private static readonly Guid MainIconId = new("6f2b6a2b-3c0a-4b7b-9a5b-6a7a6a2b6a01");
+    private static readonly Guid NotificationIconId = new("6f2b6a2b-3c0a-4b7b-9a5b-6a7a6a2b6a02");
+
     private readonly TaskbarIcon _icon;
     private readonly Icon _idleIcon = DrawIcon(captureActive: false);
     private readonly Icon _captureActiveIcon = DrawIcon(captureActive: true);
 
-    public TrayIconHost(Action openPanel, Action exit)
+    public TrayIconHost(Action openPanel, Action exit) : this(openPanel, exit, MainIconId)
+    {
+    }
+
+    private TrayIconHost(Action openPanel, Action exit, Guid id)
     {
         var menu = new ContextMenu();
         var open = new MenuItem { Header = "Open Winly" };
@@ -24,7 +36,7 @@ public sealed class TrayIconHost : IDisposable
         menu.Items.Add(new Separator());
         menu.Items.Add(quit);
 
-        _icon = new TaskbarIcon { ToolTipText = "Winly", Icon = _idleIcon, ContextMenu = menu };
+        _icon = new TaskbarIcon { Id = id, ToolTipText = "Winly", Icon = _idleIcon, ContextMenu = menu };
         _icon.TrayLeftMouseUp += (_, _) => openPanel();
         _icon.ForceCreate();
     }
@@ -49,7 +61,7 @@ public sealed class TrayIconHost : IDisposable
 
     public static async Task ShowAlreadyRunningNotification()
     {
-        using var host = new TrayIconHost(() => { }, () => { });
+        using var host = new TrayIconHost(() => { }, () => { }, NotificationIconId);
         host.Notify("Winly", "Winly is already running.");
         await Task.Delay(TimeSpan.FromSeconds(3));
     }

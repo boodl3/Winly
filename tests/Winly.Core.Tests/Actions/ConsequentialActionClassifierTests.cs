@@ -17,7 +17,7 @@ public class ConsequentialActionClassifierTests
         [DesktopActionKind.Volume] = false,
         [DesktopActionKind.Window] = false,   // focus/minimize/left/… ; close is covered below
         [DesktopActionKind.System] = false,   // darkmode/brightness/… ; lock and sleep below
-        [DesktopActionKind.Type] = true,
+        [DesktopActionKind.Type] = false,  // text is undoable; the focus check is the guard, not a question
         [DesktopActionKind.Clipboard] = false,
         [DesktopActionKind.OpenPath] = false,
         [DesktopActionKind.Click] = false,    // an ordinary link or button; destructive labels below
@@ -108,5 +108,19 @@ public class ConsequentialActionClassifierTests
 
         Assert.DoesNotContain("hunter2", ConsequentialActionClassifier.Describe(action), StringComparison.Ordinal);
         Assert.DoesNotContain("hunter2", ConsequentialActionClassifier.Ask(action), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Typing is never confirmed, however long the text or wherever it is aimed. Dropping the gate
+    /// was asked for outright; what has to stay true is that dropping it moved nothing else.
+    /// </summary>
+    [Fact]
+    public void TypingIsNeverConfirmedAndNothingElseMovedWithIt()
+    {
+        Assert.False(ConsequentialActionClassifier.IsConsequential(
+            new DesktopAction(DesktopActionKind.Type, "the whole of a long email draft")));
+        Assert.True(ConsequentialActionClassifier.IsConsequential(new DesktopAction(DesktopActionKind.Window, "Word", "close")));
+        Assert.True(ConsequentialActionClassifier.IsConsequential(new DesktopAction(DesktopActionKind.System, "lock")));
+        Assert.True(ConsequentialActionClassifier.IsConsequential(new DesktopAction(DesktopActionKind.Click, "Send")));
     }
 }

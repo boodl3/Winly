@@ -32,6 +32,18 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
 
     public void RememberTypingTarget() => _typingTarget = NativeDesktopMethods.GetForegroundWindow();
 
+    /// <summary>
+    /// Moves "here" to the window Winly has just deliberately put in front of the user.
+    ///
+    /// The target is otherwise stamped once, at key release, which is right for "type this where I
+    /// am" and wrong for every request that opens something first: "open Notepad and write me a
+    /// summary" pointed typing at whatever the user had been looking at, and
+    /// <see cref="UserInputControl.Type"/> then refused it as "you moved to a different window" —
+    /// the user had not moved, Winly had. Only a step that changed the foreground on purpose moves
+    /// it, so a window that steals focus by itself still stops the typing.
+    /// </summary>
+    private void RetargetTypingTo(nint window) => _typingTarget = window;
+
     public async Task<string?> Run(DesktopAction action, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -52,6 +64,11 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
                 break;
             case DesktopActionKind.Window:
                 WindowControl.Apply(action.Target, action.Argument);
+                if (action.Argument.Equals("focus", StringComparison.OrdinalIgnoreCase))
+                {
+                    RetargetTypingTo(NativeDesktopMethods.GetForegroundWindow());
+                }
+
                 break;
             case DesktopActionKind.System:
                 await SystemControl.Apply(action.Target, action.Amount, action.Relative, cancellationToken);
@@ -70,6 +87,9 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
                     throw new DesktopActionFailedException($"I couldn't find {action.Target} on your screen to click.");
                 }
 
+                // Pressing a field is how a caret gets into it, so whatever was just clicked is
+                // where the next "type" in this sequence belongs.
+                RetargetTypingTo(NativeDesktopMethods.GetForegroundWindow());
                 break;
             default:
                 throw new DesktopActionFailedException("I don't know how to do that yet.");
@@ -93,9 +113,22 @@ public sealed class WindowsDesktopActions(IMusicService music) : IDesktopActions
         while (DateTimeOffset.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (RespondsToMessages(AppMatcher.FindWindowed(appName)))
+            var candidate = AppMatcher.FindWindowed(appName);
+            if (RespondsToMessages(candidate))
             {
                 Log.Debug("{App} is ready to be acted on", appName);
+
+                // Bring it to the front and then stamp whatever is actually in front, rather than
+                // stamping MainWindowHandle and hoping. An app that was already running hands back
+                // the handle of its *previous* window while the one it just opened takes the focus,
+                // so "open Notepad and write this" was aiming at a Notepad window the user was not
+                // looking at and refusing with "you moved to a different window" — about a move
+                // Winly had made. Focus already does the hard half (it checks GetForegroundWindow
+                // afterwards rather than trusting SetForegroundWindow, with the AttachThreadInput
+                // fallback behind it), so this makes VerifyTarget's claim true instead of weakening
+                // it: something else stealing focus later still stops the typing.
+                WindowControl.Focus(candidate!.MainWindowHandle);
+                RetargetTypingTo(NativeDesktopMethods.GetForegroundWindow());
                 return true;
             }
 

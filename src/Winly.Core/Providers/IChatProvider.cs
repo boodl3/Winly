@@ -28,7 +28,8 @@ public sealed record ChatAnswer(
     PointingTarget? PointingTarget,
     IReadOnlyList<DesktopAction>? Actions = null,
     bool NeedsScreen = false,
-    bool NeedsWebSearch = false)
+    bool NeedsWebSearch = false,
+    bool AwaitingReply = false)
 {
     public IReadOnlyList<DesktopAction> Actions { get; init; } = Actions ?? [];
 }

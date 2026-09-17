@@ -13,6 +13,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Winly.Core\Winly.Core.csproj" />
+    <!-- So the interop struct sizes can be pinned in CI. A wrong sizeof(INPUT) makes SendInput fail
+         silently, which killed three verbs for as long as they have existed. -->
+    <InternalsVisibleTo Include="Winly.Core.Tests" />
   </ItemGroup>
 
   <ItemGroup>
